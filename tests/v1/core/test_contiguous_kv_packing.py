@@ -9,7 +9,6 @@ block dim (a contiguous region per layer) or inside it (all layers' pages within
 block); the allocation is the same either way.
 """
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,13 +19,11 @@ from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
     _pool_bytes_per_block,
     get_kv_cache_config_from_groups,
-    get_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import allocate_and_reshape_kv_cache
@@ -71,6 +68,9 @@ def _mock_vllm_config():
     config = MagicMock()
     config.cache_config.num_gpu_blocks_override = None
     config.cache_config.kv_cache_layout = None
+    # These tests pin explicit layouts for the direct packing; the extensible
+    # KV cache would force a block-outermost layout for mixed page sizes.
+    config.cache_config.enable_extensible_kv_cache = False
     return config
 
 
