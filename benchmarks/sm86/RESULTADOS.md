@@ -222,3 +222,90 @@ para a faixa dos 30k. Trocar contexto por TTFT e exatamente o inverso do pedido
     c) TTFT 1o vs 2o request, prompt identico     mede se o align serve para algo
     d) drafter dspark-qwen38-w4a4 quantizado      ataca o teto de 4.928 tokens
     e) equivalencia greedy do DSpark              criterio de aceite
+
+## Correcao do item 6: o chunk size E knob, e agora e' variavel de run
+
+Eu disse que `FLA_CHUNK_SIZE` nao era parametro. Errado. Doze dos sitios ja o
+escrevem como `chunk_size: int = FLA_CHUNK_SIZE` -- e argumento com default. O que
+prende nao e a assinatura, e o MOMENTO: default de funcao liga no import.
+
+Entao o override certo e no ambiente, lido no import, uma vez, por todos:
+
+    VLLM_FLA_CHUNK_SIZE=32   (utils.py, potencia de dois, >= 16)
+
+Isso cobre os 34 sitios de uma vez, inclusive os que leem o global em tempo de
+chamada (`chunk.py:38`, `gdn_attn.py:335-387`), porque todos veem o mesmo numero.
+
+O que NAO se pode fazer: mexer no valor com o processo rodando. `chunk.py` le o
+global vivo, os sub-ops carregam o default do import. Dois tamanhos de tile na
+mesma cadeia de kernel nao e' resultado lento, e resultado errado. Por isso o
+`--chunk-sizes` do bench relanca um subprocesso por valor em vez de fazer laco.
+
+    python benchmarks/sm86/bench_gdn.py --chunk-sizes 32 64 128
+
+Nenhum assert na arvore fixa 64, mas tile grande demais estoura a shared memory do
+sm_86 e falha no compile do Triton. O bench trata isso como resultado e segue.
+
+Os entrypoints agora imprimem `FLA_CHUNK=` no boot, para nenhuma medicao de
+servidor ficar sem o eixo.
+
+## Estado do SSM abaixo de 16 bits: ninguem entrega, e o motivo e estrutural
+
+Pergunta: alguem ja tentou baixar de fp16?
+
+**No vLLM nao ha nem a opcao.** `MambaDType = Literal["auto","float32","float16",
+"bfloat16"]` (cache.py:37). Nao e flag que falta validacao, e membro que nao existe
+no enum. Grep por fp8/int8 em `layers/mamba/` nao acha nada de estado.
+
+**O motivo nao e preguica, e a recorrencia.** Uma entrada de KV e escrita uma vez e
+lida muitas: o erro de quantizacao fica local. O estado do SSM e lido-modificado-
+escrito A CADA PASSO. Erro de um passo entra no proximo e acumula. Oito mil tokens
+de decode sao oito mil arredondamentos sobre o mesmo tensor.
+
+O proprio vLLM ja sente isso em 16 bits: existe
+`--enable-mamba-cache-stochastic-rounding`, com rodadas de Philox configuraveis,
+cuja docstring diz "usa bits aleatorios para desviesar o erro de arredondamento,
+o que pode melhorar a estabilidade numerica para sequencias longas"
+(config/mamba.py:43-49). Se 16 bits precisam de PRNG para nao derivar, e4m3 --
+tres bits de mantissa -- e outro esporte.
+
+**A pesquisa que existe quantiza peso, nao estado.** Quamba e Quamba2
+(arXiv 2410.13229, 2503.22879) fazem W4A8/W8A8 em Mamba1/2, mas precisaram de
+reordenacao de pesos ciente de cluster, agrupando heads e canais de faixa parecida
+para dividir escala, mais quantizacao por grupo de estado para B e C. Isto e: 8 bits
+da, com um framework inteiro em volta, e e int8 com escalas, nao fp8 cru na memoria.
+Ternary Mamba (arXiv 2606.18114) e W1.58**A16** -- o A16 entrega o jogo: ate o
+paper ternario mantem o estado em 16 bits.
+
+**O unico caminho credivel que achei contorna o problema em vez de resolver.**
+RFC vllm#47572 (ReplaySSM) avalia estado em fp16/fp8 guardando os ENTRADAS do SSM
+num ring buffer e reconstruindo, com flush de checkpoint a cada B passos -- assim o
+estado de baixa precisao e requantizado muito menos vezes que uma vez por passo.
+Esta nesta arvore (`use_replayssm`, `replayssm_buffer_len=16`), e fechado para nos:
+`validate_mamba_cached_kernel` exige `supports_replayssm`, que so o Nemotron-H
+declara, exige backend Triton e recusa spec decode.
+
+### Se existisse, quanto valeria AQUI
+
+Velocidade: nada. Decode do GDN e limitado por ocupacao; os 0,18 ms de trafego sao
+2,9% dos 6,24 ms.
+
+O premio de verdade seria outro, e ninguem na lista externa mencionou. A page do
+mamba tem que caber na page da atencao, e isso EMPURRA o block size da atencao.
+Do log de boot real:
+
+    interface.py:911  Setting attention block size to 448 tokens
+                      to ensure that attention page size is >= mamba page size
+
+Conferindo: estado ssm por camada em bf16 = 48 x 128 x 128 x 2 = 1,5 MiB; page de
+atencao por token = 2 x 4 kv_heads x 256 head_dim x 2 = 4 KiB. 1,5 MiB / 4 KiB =
+384 tokens, mais o conv state fecha em 448.
+
+Em modo `align`, `mamba_block_size = block_size`. Ou seja: **o estado do GDN so e
+checkpointado a cada 448 tokens**, e essa e a granularidade do prefix caching que
+ja esta ligado. Estado em 8 bits levaria isso para ~224, dobrando a frequencia de
+checkpoint e reduzindo o desperdicio de bloco parcial.
+
+Mas isso exige dtype que nao existe no enum mais load/store nos kernels Triton do
+FLA mais gestao de escala. E projeto, nao knob. Fica registrado como o argumento
+certo caso alguem volte ao assunto.

@@ -31,9 +31,20 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import os
 import statistics
+import subprocess
+import sys
 
 import torch
+
+# O tamanho do tile que os kernels FLA realmente usam. Importado, nao assumido:
+# se a arvore nao le a variavel de ambiente, o numero impresso tem que ser o que
+# o kernel viu, senao a varredura mente sobre o proprio eixo.
+try:
+    from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+except ImportError:  # arvore 1Cat, sem o override
+    FLA_CHUNK_SIZE = 64
 
 # Os kernels FLA mudaram de lugar entre as arvores: o 1Cat (base 0.21) os tem em
 # model_executor/layers/fla/ops, o 0.27.1 em third_party/flash_linear_attention.
@@ -139,8 +150,50 @@ def time_ms(fn, inputs, iters: int = 50, warmup: int = 10) -> tuple[float, float
     return statistics.median(samples), samples[0]
 
 
+def relaunch_per_chunk_size(sizes: list[int]) -> int:
+    """Run this bench once per chunk size, each in its own process.
+
+    FLA_CHUNK_SIZE binds into a dozen default arguments at import time. A loop
+    inside one process would move the global for the callers that read it live
+    and leave it stale for the ones that captured the default -- two tile sizes
+    in one kernel chain, which is a wrong answer, not a slow one. One process
+    per value is the only honest sweep.
+    """
+    argv, skip = [], False
+    for a in sys.argv[1:]:
+        if a == "--chunk-sizes":
+            skip = True
+            continue
+        if skip:
+            if not a.startswith("-"):
+                continue
+            skip = False
+        argv.append(a)
+
+    worst = 0
+    for s in sizes:
+        print(f"\n{'=' * 60}\nVLLM_FLA_CHUNK_SIZE={s}\n{'=' * 60}", flush=True)
+        rc = subprocess.run(
+            [sys.executable, __file__, *argv],
+            env=dict(os.environ, VLLM_FLA_CHUNK_SIZE=str(s)),
+        ).returncode
+        if rc != 0:
+            # Nao compilar num tamanho e resultado: tile grande demais estoura a
+            # shared memory do sm_86. Segue para o proximo em vez de parar.
+            print(f"  chunk {s}: saiu com codigo {rc}", flush=True)
+            worst = rc
+    return worst
+
+
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument(
+        "--chunk-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Varre VLLM_FLA_CHUNK_SIZE, um subprocesso por valor. Ex: 32 64 128.",
+    )
     p.add_argument(
         "--tokens-per-forward",
         type=int,
@@ -153,6 +206,9 @@ def main():
     p.add_argument("--dtype", default="bfloat16")
     args = p.parse_args()
 
+    if args.chunk_sizes:
+        raise SystemExit(relaunch_per_chunk_size(args.chunk_sizes))
+
     if not torch.cuda.is_available():
         raise SystemExit("precisa de GPU — este bench nao carrega modelo, mas roda kernel")
 
@@ -161,6 +217,7 @@ def main():
     name = torch.cuda.get_device_name(0)
     cap = torch.cuda.get_device_capability(0)
     print(f"GPU {name}  sm_{cap[0]}{cap[1]}  dtype {args.dtype}")
+    print(f"FLA_CHUNK_SIZE {FLA_CHUNK_SIZE}")
     print(f"orcamento por token a {BASELINE_TOK_S} tok/s: {BUDGET_MS:.2f} ms")
     print(f"{NUM_GDN_LAYERS} camadas GDN de 64\n")
 

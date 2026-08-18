@@ -28,7 +28,30 @@ FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 SUPPRESS_LEVEL = int(os.getenv("GDN_RECOMPUTE_SUPPRESS_LEVEL", "0"))
 
 # Default chunk size used across FLA triton kernels (kda, chunk, chunk_o, etc.)
-FLA_CHUNK_SIZE = 64
+#
+# 64 is the upstream value and it was picked on Hopper. On sm_86 the tile that
+# fits shared memory and the tile that fills 82 SMs are not obviously the same
+# number, and nothing in this tree ever tried another one.
+#
+# Read from the environment at import time, deliberately. Most consumers spell
+# it `chunk_size: int = FLA_CHUNK_SIZE`, so their default binds once, when the
+# module is imported -- while chunk.py reads the global on every call. Rebinding
+# this at runtime would therefore desync the two groups and silently produce
+# wrong output, not a slow one. Set it before the process starts, or not at all.
+FLA_CHUNK_SIZE = int(os.getenv("VLLM_FLA_CHUNK_SIZE", "64"))
+
+if FLA_CHUNK_SIZE < 16 or FLA_CHUNK_SIZE & (FLA_CHUNK_SIZE - 1):
+    raise ValueError(
+        f"VLLM_FLA_CHUNK_SIZE={FLA_CHUNK_SIZE} is invalid: the FLA kernels use it "
+        "as a Triton constexpr tile, so it must be a power of two and at least 16."
+    )
+if FLA_CHUNK_SIZE != 64:
+    logger.warning(
+        "FLA chunk size overridden to %d (upstream default is 64). Large tiles "
+        "can exceed shared memory and fail at Triton compile time; small tiles "
+        "raise launch count. Verify output, not just throughput.",
+        FLA_CHUNK_SIZE,
+    )
 
 
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
