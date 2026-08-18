@@ -94,3 +94,29 @@ def test_drafterless_run_forwards_nothing(monkeypatch):
     for rank in range(2):
         start, end = get_pp_indices(NUM_LAYERS, rank, 2)
         assert list(EagleModelMixin.local_aux_tap_ids(start, end, (), rank == 0)) == []
+
+
+def test_qwen3_next_opts_in():
+    """Qwen3.5 inherits Qwen3NextModel, so the opt-in has to land there.
+
+    Without it the runner keeps raising the blanket "Pipeline parallelism is
+    not supported for this model" for our architecture, which is what the
+    upstream PR deliberately preserves for models nobody has validated.
+    """
+    from vllm.model_executor.models.qwen3_next import Qwen3NextModel
+
+    assert Qwen3NextModel.supports_aux_hidden_states_over_pp is True
+
+
+def test_qwen3_next_forward_does_not_name_update():
+    """Packing taps through dict.update would break the model under cudagraphs.
+
+    TorchDynamoWrapper.bytecode_hook rejects any compiled forward whose
+    bytecode names `update` -- its heuristic for buffer mutation. The upstream
+    PR hit exactly this on Llama, Qwen2/3, Kimi-K3 and DeepSeek-V4, and stock
+    CUDA hides it because AOT compile bypasses the hook. So it has to be
+    asserted, not observed.
+    """
+    from vllm.model_executor.models.qwen3_next import Qwen3NextModel
+
+    assert "update" not in Qwen3NextModel.forward.__code__.co_names
