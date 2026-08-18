@@ -26,10 +26,25 @@ Duas leituras, e a segunda e a que decide:
     python benchmarks/sm86/analise_decay_gdn.py
 """
 
+import os
+import pathlib
+import sys
+
 import numpy as np
 from safetensors import safe_open
 
-P = r"C:\Users\USER\w4a4\models\awq-w4a16\model.safetensors"
+# Caminho do checkpoint: argumento de linha de comando, variavel de ambiente,
+# ou o palpite padrao relativo a raiz deste repositorio.
+P = sys.argv[1] if len(sys.argv) > 1 else os.environ.get(
+    "GDN_CHECKPOINT",
+    str(pathlib.Path(__file__).resolve().parents[2].parent
+        / "models" / "awq-w4a16" / "model.safetensors"),
+)
+if not os.path.exists(P):
+    raise SystemExit(
+        f"checkpoint nao encontrado: {P} -- "
+        "passe o caminho como argumento ou defina GDN_CHECKPOINT"
+    )
 softplus = lambda x: np.log1p(np.exp(-np.abs(x))) + np.maximum(x, 0.0)
 
 rows = []

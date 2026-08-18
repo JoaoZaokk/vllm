@@ -24,8 +24,8 @@
 #
 # Build:
 #   docker build -t qwen38-pp-dspark:0.27.1 \
-#     -f C:\Users\USER\w4a4\vllm-fork\Dockerfile.pp-dspark \
-#     C:\Users\USER\w4a4\vllm-fork
+#     -f Dockerfile.pp-dspark .
+#   (da raiz deste repositorio; o contexto de build e' a arvore do fork)
 FROM qwen38-w4a4:latest
 
 ARG SITE=/usr/local/lib/python3.12/dist-packages/vllm

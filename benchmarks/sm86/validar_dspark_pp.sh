@@ -28,15 +28,25 @@ K=${K:-7}
 # da torre de visao, que aloca o encoder no estagio 0 -- a placa de 12 GB.
 LIMIT_MM=${LIMIT_MM_PER_PROMPT-}
 PROMPT='Escreva uma funcao Python que inverte uma lista ligada. Explique cada passo.'
-OUT=/c/Users/USER/w4a4/validacao_dspark.txt
-: > $OUT
+# Raiz da stack (a que tem models/ e docker/), deduzida da localizacao deste
+# script: benchmarks/sm86 -> raiz do repo -> pai. Sobrescrevivel por ambiente
+# para quem nao guarda o fork ao lado dos modelos.
+RAIZ_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+STACK="${W4A4_ROOT:-$(cd "$RAIZ_REPO/.." && pwd)}"
+# O -v do Docker Desktop no Windows quer C:/..., nao /c/...
+STACK_MNT="$(cd "$STACK" && (pwd -W 2>/dev/null || pwd))"
+
+OUT="$STACK/validacao_dspark.txt"
+SAIDA_REF="$STACK/saida_sem_draft.json"
+SAIDA_SPEC="$STACK/saida_dspark.json"
+: > "$OUT"
 
 subir() {  # $1=nome  $2=entry  $3=spec_k
   docker rm -f val >/dev/null 2>&1
   MSYS_NO_PATHCONV=1 docker run -d --name val --gpus all -p 8000:8000 --entrypoint bash --shm-size=8g \
     -v vllm-cache:/root/.cache/vllm -v triton-cache:/root/.triton \
-    -v 'C:\Users\USER\w4a4\models:/workspace/models:ro' \
-    -v 'C:\Users\USER\w4a4\docker:/opt/qwen38/docker:ro' \
+    -v "${STACK_MNT}/models:/workspace/models:ro" \
+    -v "${STACK_MNT}/docker:/opt/qwen38/docker:ro" \
     -e PIPELINE_PARALLEL_SIZE=2 -e VLLM_PP_LAYER_PARTITION="$PART" \
     -e MODEL_PATH=/workspace/models/awq-w4a16 -e QUANTIZATION= \
     -e CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
@@ -76,8 +86,8 @@ print(f'aceitos={a:.0f} rascunhos={d:.0f} taxa={a/d:.4f}' if d else 'sem contado
 # comparacao tinha mais de uma variavel e a equivalencia nao provava nada.
 echo "== A: PP=2 sem draft (referencia) ==" | tee -a $OUT
 if subir A dspark_entry.sh 0; then
-  gerar > /c/Users/USER/w4a4/saida_sem_draft.json
-  echo "  subiu, $(wc -c < /c/Users/USER/w4a4/saida_sem_draft.json) bytes de saida" | tee -a $OUT
+  gerar > "$SAIDA_REF"
+  echo "  subiu, $(wc -c < "$SAIDA_REF") bytes de saida" | tee -a $OUT
 else
   echo "  FALHOU: $(docker logs val 2>&1 | grep -oE 'No available memory|estimated maximum model length is [0-9]+|NotImplementedError[^\"]*' | tail -1)" | tee -a $OUT
 fi
@@ -85,7 +95,7 @@ docker rm -f val >/dev/null 2>&1
 
 echo "== B: PP=2 + DSpark k=$K ==" | tee -a $OUT
 if subir B dspark_entry.sh "$K"; then
-  gerar > /c/Users/USER/w4a4/saida_dspark.json
+  gerar > "$SAIDA_SPEC"
   echo "  subiu | $(aceitacao)" | tee -a $OUT
 else
   echo "  FALHOU: $(docker logs val 2>&1 | grep -oE 'No available memory|SupportsPP|NotImplementedError[^\"]*|Unsupported context manager' | tail -1)" | tee -a $OUT
@@ -93,8 +103,8 @@ fi
 docker rm -f val >/dev/null 2>&1
 
 echo "== veredito ==" | tee -a $OUT
-if [ -s /c/Users/USER/w4a4/saida_sem_draft.json ] && [ -s /c/Users/USER/w4a4/saida_dspark.json ]; then
-  if diff -q /c/Users/USER/w4a4/saida_sem_draft.json /c/Users/USER/w4a4/saida_dspark.json >/dev/null; then
+if [ -s "$SAIDA_REF" ] && [ -s "$SAIDA_SPEC" ]; then
+  if diff -q "$SAIDA_REF" "$SAIDA_SPEC" >/dev/null; then
     echo "  IDENTICO — verificacao correta sob greedy" | tee -a $OUT
   else
     echo "  DIVERGIU — spec decode aceitou token que o alvo nao produziria" | tee -a $OUT

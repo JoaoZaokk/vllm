@@ -101,10 +101,15 @@ param(
     [string]$OutPath    = "$PSScriptRoot\results.jsonl",
     [int]$Port          = 8000,
     [int]$BootTimeoutSec = 900,
-    [string]$ModelPath  = "C:\Users\USER\w4a4\models\awq-w4a16"
+    # Raiz da stack (a que tem models/ e docker/): pai da raiz deste repo.
+    # $PSScriptRoot e benchmarks/sm86, entao dois niveis acima e a raiz do
+    # fork e tres e a stack. Sobrescrevivel na chamada.
+    [string]$StackRoot  = (Resolve-Path "$PSScriptRoot\..\..\..").Path,
+    [string]$ModelPath  = $null
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $ModelPath) { $ModelPath = Join-Path $StackRoot "modelswq-w4a16" }
 $KIB = 1024
 $GIB = 1073741824
 
@@ -353,7 +358,7 @@ foreach ($p in $ok) {
     Write-Host "subindo $nome ..." -ForegroundColor Green
     docker run -d --name $nome --gpus all -p "${Port}:8000" `
         -v "${ModelPath}:/workspace/models/awq-w4a16:ro" `
-        -v "C:\Users\USER\w4a4\docker:/opt/qwen38/docker:ro" `
+        -v "$StackRoot\docker:/opt/qwen38/docker:ro" `
         @envs $b.imagem /opt/qwen38/docker/awq_entry.sh | Out-Null
 
     try {
