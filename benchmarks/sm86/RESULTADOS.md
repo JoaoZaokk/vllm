@@ -97,17 +97,128 @@ PN350 nem e codigo, e issue. PN365/PN298/PN345 sao PRs abertos upstream.
 
 ## GDN: onde o ganho PODE estar (nao medido)
 
-`ChunkGatedDeltaRule` e um CustomOp com DOIS caminhos:
-  forward_cuda   -> flashinfer.gdn_prefill   (instalado: flashinfer 0.6.16.post3, importa)
-  forward_native -> fla_chunk_gated_delta_rule (Triton, o que medimos)
+`ChunkGatedDeltaRule` tem TRES caminhos, nao dois:
+  forward_cuda    -> flashinfer.gdn_prefill      (flashinfer 0.6.16.post3, importa)
+  forward_cutedsl -> kernel CuteDSL in-tree
+  forward_native  -> fla_chunk_gated_delta_rule  (Triton, o que medimos)
 
-Rodamos o nativo porque a config vem com `custom_ops: [none]`, nao por escolha
-medida. So o op de chunk (PREFILL) tem alternativa; decode nao tem.
+Correcao do que estava escrito aqui antes: nao e `custom_ops: [none]` que nos
+prende no nativo. O `__init__` atribui `self._forward_method` na mao, passando
+por cima do despacho normal de CustomOp. Quem decide e
+`_resolve_gdn_prefill_backend` (qwen_gdn_linear_attn.py:84):
+
+    SM90 (Hopper)                                          -> flashinfer
+    familia SM100 (Blackwell) + head_k_dim 128 + CUDA >= 13 -> flashinfer/cutedsl
+    resto                                                  -> triton
+
+sm_86 cai no `resto`. Nenhuma config muda isso: pedir
+`additional_config.gdn_prefill_backend = flashinfer` so emite
+"cannot use this kernel on the current platform" e volta para Triton. O portao
+e de arquitetura, e a arquitetura aqui nao passa.
+
+So o op de chunk (PREFILL) tem alternativa. Decode nao tem: fused_recurrent e
+Triton em qualquer backend.
 
 Importa porque prefill e o gargalo real do uso (repo no prompt): GDN custa
 178,84 ms contra 219,72 da atencao em 8k, ~45% do prefill. Se o kernel do
-FlashInfer for mais rapido em sm_86, e ganho de TTFT sem escrever kernel.
+FlashInfer rodar e ganhar em sm_86, levantar o portao e uma linha no resolver.
 
-Ressalvas: o kernel pode ser Hopper-only e cair em erro/lentidao no sm_86, e
-ligar `custom_ops` muda mais que esse op. Proximo passo: acrescentar o caminho
-`fi_` ao bench_gdn ao lado do `fla_` e comparar nas mesmas formas.
+O bench agora chama `fi_chunk_gated_delta_rule` direto, pulando o portao, com
+cu_seqlens dos dois lados para a comparacao ser justa (a linha `fla` sem
+cu_seqlens fica para nao quebrar a serie ja gravada acima). Tres desfechos, e
+os tres fecham a pergunta:
+
+    nao compila     -> portao esta certo, alavanca morre
+    compila e perde -> portao esta certo, alavanca morre
+    compila e ganha -> patch de uma linha, ganho de TTFT sem escrever kernel
+
+Falta rodar. Precisa de GPU, ~1 min, sem subir servidor.
+
+## Triagem da lista externa (Qwen 3.8 Max, sem internet) — 18/ago/2026
+
+Sete itens, ordenados por ele. Reordenados aqui pelo que o codigo e os entrypoints
+dizem. Cinco morrem na leitura; dois entram na fila.
+
+### 1. "prefix caching do estado do GDN" — JA ESTA LIGADO
+
+`docker/awq_entry.sh:103-105` e `docker/dspark_entry.sh:111-113` ja passam:
+
+    --enable-prefix-caching --enable-chunked-prefill --mamba-cache-mode align
+
+Estava ligado em TODAS as medicoes deste arquivo. Nao ha nada para ativar.
+
+E `align` e o teto para este modelo, nao uma escolha conservadora:
+  - `qwen3_5.py:313` levanta NotImplementedError em modo `all`
+  - `Qwen3_5ForConditionalGeneration` nao declara `supports_mamba_prefix_caching`,
+    entao `models/config.py:616` resolveria para `align` sozinho de qualquer jeito
+  - `all` tambem obriga `mamba_block_size` a virar multiplo do chunk (interface.py:890),
+    o que inflaria o block size da atencao
+
+O que `align` cacheia (cache.py:145): o estado do GDN do ultimo token de cada passo
+do scheduler, quando o token cai em `i * block_size`. Com chunked prefill isso
+acontece regularmente, entao a restauracao de prefixo e real -- mas so a partir da
+SEGUNDA chamada com o mesmo prefixo. Prompt novo paga prefill inteiro. Os 178,84 ms
+de GDN e 219,72 de atencao em 8k continuam sendo o custo do primeiro request, e e
+esse o numero que manda no TTFT de codigo novo.
+
+NAO MEDIDO e vale medir: a taxa de acerto de verdade. TTFT do 1o contra o 2o request
+com prompt identico, na mesma sessao. Se o 2o nao cair muito, `align` esta
+checkpointando pouco e ai sim ha trabalho.
+
+### 2. "estado em fp16" — JA E bfloat16
+
+`awq_entry.sh:55-56`: `MAMBA_CACHE_DTYPE` e `MAMBA_SSM_CACHE_DTYPE` ja vem
+`bfloat16`. `MambaDType` (cache.py:37) so oferece auto/float32/float16/bfloat16 --
+fp16 tem a MESMA largura que bf16. Nao ha trafego para cortar.
+
+E mesmo que houvesse: a premissa dele inverte a nossa medicao. O decode do GDN e
+limitado por OCUPACAO (192 CTAs x 1 warp em 82 SMs, ~5%), nao por banda. Os 0,18 ms
+de trafego sao 2,9% dos 6,24 ms. Cortar trafego pela metade compraria 0,09 ms de
+22,43 -- 0,4% do token. Nao e o item 2 de nada.
+
+### 3. fla vendado vs fla upstream — ENTRA NA FILA
+
+Verdadeiro: o vLLM carrega copia propria em `third_party/flash_linear_attention`.
+Comparar com o `flash-linear-attention` do fla-org e A/B de bench, sem servidor,
+e o `bench_gdn.py` ja e o lugar. Melhor item da lista dele.
+
+### 4. FlashInfer — RESOLVIDO HOJE, ele estava certo
+
+Ver secao acima: o portao e `_resolve_gdn_prefill_backend`, SM90 ou familia SM100.
+sm_86 nunca chega em `forward_cuda`. O bench passa por cima do portao para separar
+"o portao esta certo" de "o portao esta conservador".
+
+### 5. SGLang A/B — aberto, mas nao sao 20 min
+
+Exige AWQ de Qwen3.5 hibrido suportado la, mais boot, mais config. Fica na fila
+atras do que roda em segundos.
+
+### 6. chunk size 64 — nao e knob
+
+`FLA_CHUNK_SIZE = 64` (third_party/flash_linear_attention/ops/utils.py:31) e
+constante de modulo com 34 usos na arvore, nao parametro de funcao. Indexacao de
+chunk depende dela. Sweepavel so junto com o item 3, trocando pela versao upstream
+onde e argumento.
+
+### 7. TP=2 para TTFT — TROCA CONTRA O QUE MAIS IMPORTA AQUI
+
+Divisibilidade passa: kv_heads 4, linear k/v heads 16/48, todos pares. O problema e
+memoria. TP fatia os pesos IGUAIS, entao a 3080 Ti de 12 GB manda nas duas:
+
+    TP=2   pesos ~8 GB/placa  -> ~4 GB livres na 3080 Ti, e a 3090 fica capada
+                                 no mesmo valor. KV total ~8 GB.
+    PP=2 56/8  3080 Ti segura 8 camadas (~2 GB) -> ~10 GB livres
+               3090 segura 56 (~14 GB)          -> ~7 GB livres
+               KV total ~17 GB.
+
+TP=2 corta o orcamento de KV pela metade. Isso derruba o teto de contexto de 65k
+para a faixa dos 30k. Trocar contexto por TTFT e exatamente o inverso do pedido
+("o quanto mais contexto melhor"). Nao entra.
+
+### Fila resultante
+
+    a) fi_ vs fla no bench_gdn                    ~1 min de placa, ja escrito
+    b) fla upstream vs vendado no bench_gdn       ~10 min, falta escrever
+    c) TTFT 1o vs 2o request, prompt identico     mede se o align serve para algo
+    d) drafter dspark-qwen38-w4a4 quantizado      ataca o teto de 4.928 tokens
+    e) equivalencia greedy do DSpark              criterio de aceite

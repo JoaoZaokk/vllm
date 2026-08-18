@@ -50,6 +50,22 @@ except ImportError:  # arvore 1Cat
         fused_recurrent_gated_delta_rule,
     )
 
+# O caminho FlashInfer do prefill GDN. Existe no 0.27.1 e e' inalcancavel nesta
+# placa: _resolve_gdn_prefill_backend() so' o libera em SM90 (Hopper) ou na
+# familia SM100 (Blackwell) com head_k_dim 128 e CUDA >= 13. sm_86 cai no else e
+# recebe "triton" -- por arquitetura, nao por medicao.
+#
+# Chamar o wrapper direto pula esse portao. E' a unica forma de responder se
+# levantar o portao para sm_86 compraria alguma coisa, ou se o kernel nem
+# compila aqui. As duas respostas encerram a pergunta; nenhuma delas sai de ler
+# codigo.
+try:
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        fi_chunk_gated_delta_rule,
+    )
+except ImportError:
+    fi_chunk_gated_delta_rule = None
+
 # --- checkpoint geometry ---------------------------------------------------
 NUM_GDN_LAYERS = 48
 K_HEADS, K_DIM = 16, 128
@@ -157,16 +173,53 @@ def main():
         print(f"{t:>8} {med:>11.4f} {total:>9.2f} {100 * total / BUDGET_MS:>11.1f}%")
 
     print("\n== prefill (chunk) ==")
-    print(f"{'seqlen':>8} {'ms/camada':>11} {'ms x48':>9}")
+    print(f"{'seqlen':>8} {'kernel':>10} {'ms/camada':>11} {'ms x48':>9}")
     for s in args.prefill:
         inputs = make_inputs(args.batch, s, dev, dtype)
+
+        # Sem cu_seqlens: e' a chamada que produziu os numeros ja' gravados em
+        # RESULTADOS.md. Fica para a serie nao quebrar quando este arquivo muda.
         med, _ = time_ms(chunk_gated_delta_rule, inputs, iters=20, warmup=5)
-        print(f"{s:>8} {med:>11.4f} {med * NUM_GDN_LAYERS:>9.2f}")
+        print(f"{s:>8} {'fla':>10} {med:>11.4f} {med * NUM_GDN_LAYERS:>9.2f}")
+
+        # A partir daqui, a convencao que o vLLM realmente usa no prefill: uma
+        # sequencia empacotada, descrita por cu_seqlens. Comparar fla contra
+        # flashinfer exige as duas do mesmo lado dessa linha.
+        varlen = dict(inputs, cu_seqlens=torch.tensor([0, s], device=dev, dtype=torch.int32))
+        med_v, _ = time_ms(chunk_gated_delta_rule, varlen, iters=20, warmup=5)
+        print(f"{s:>8} {'fla+cu':>10} {med_v:>11.4f} {med_v * NUM_GDN_LAYERS:>9.2f}")
+
+        if fi_chunk_gated_delta_rule is None:
+            continue
+        try:
+            # Primeira chamada isolada: o FlashInfer compila por JIT, e essa
+            # compilacao ja' contaminou uma medicao minha antes. O custo dela e'
+            # um numero de boot, nao de token -- separado, nao escondido.
+            jit = torch.cuda.Event(True), torch.cuda.Event(True)
+            jit[0].record()
+            call(fi_chunk_gated_delta_rule, varlen)
+            jit[1].record()
+            jit[1].synchronize()
+            med_f, _ = time_ms(fi_chunk_gated_delta_rule, varlen, iters=20, warmup=5)
+            print(
+                f"{s:>8} {'fi':>10} {med_f:>11.4f} {med_f * NUM_GDN_LAYERS:>9.2f}"
+                f"   (1a chamada {jit[0].elapsed_time(jit[1]):.0f} ms, JIT)"
+            )
+            print(f"{'':>8} {'':>10} {'':>11} {'ganho':>9}"
+                  f"   {100 * (med_v - med_f) / med_v:+.1f}% vs fla+cu")
+        except Exception as e:  # noqa: BLE001
+            # Nao compilar aqui e' resultado, nao falha do bench: significa que
+            # o portao de arquitetura esta' certo e a alavanca morre.
+            print(f"{s:>8} {'fi':>10} {'--':>11} {'--':>9}   {type(e).__name__}: {e}")
+            break
 
     print(
         "\nLeitura: a coluna de porcentagem e o teto do que QUALQUER tuning de GDN\n"
         "pode comprar no decode. Se ela for pequena, PN365/PN350/PN354/PN299 nao\n"
-        "valem o esforco e a fila muda."
+        "valem o esforco e a fila muda.\n"
+        "\n"
+        "A linha fi so' importa para prefill/TTFT. O decode nao tem alternativa:\n"
+        "fused_recurrent e' Triton em qualquer backend."
     )
 
 
