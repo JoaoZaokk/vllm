@@ -82,3 +82,32 @@ para W4 libera ~4 GiB, e é o próximo passo.
 Ordem das placas importa: o drafter fica no ÚLTIMO estágio, então
 `CUDA_VISIBLE_DEVICES=1,0` põe a 3080 Ti como estágio 0 e deixa a 3090 (24 GB)
 hospedar o drafter. Com a ordem natural, ele cai na placa de 12 GB e estoura.
+
+## GDN: onde o ganho NAO esta (verificado 18/ago)
+
+Hipotese do `splitting_ops` DERRUBADA pela docstring do proprio campo:
+`FULL_AND_PIECEWISE` captura cudagraph FULL para batches de decode, e piecewise
+so para prefill e batches mistos. Os ops GDN so ficam fora do grafo no caminho
+piecewise, onde cada kernel dura milissegundos e lancamento e ruido. Nao ha
+overhead de lancamento a recuperar no decode -- os 6,24 ms sao kernel de verdade.
+
+Patches de fusao do SNDR valem menos que pareciam: no 0.27.1 o gate ja e kernel
+fundido (`fused_gdn_gating`) e a projecao QKV+Z ja e um GEMM so (`in_proj_qkvz`).
+PN350 nem e codigo, e issue. PN365/PN298/PN345 sao PRs abertos upstream.
+
+## GDN: onde o ganho PODE estar (nao medido)
+
+`ChunkGatedDeltaRule` e um CustomOp com DOIS caminhos:
+  forward_cuda   -> flashinfer.gdn_prefill   (instalado: flashinfer 0.6.16.post3, importa)
+  forward_native -> fla_chunk_gated_delta_rule (Triton, o que medimos)
+
+Rodamos o nativo porque a config vem com `custom_ops: [none]`, nao por escolha
+medida. So o op de chunk (PREFILL) tem alternativa; decode nao tem.
+
+Importa porque prefill e o gargalo real do uso (repo no prompt): GDN custa
+178,84 ms contra 219,72 da atencao em 8k, ~45% do prefill. Se o kernel do
+FlashInfer for mais rapido em sm_86, e ganho de TTFT sem escrever kernel.
+
+Ressalvas: o kernel pode ser Hopper-only e cair em erro/lentidao no sm_86, e
+ligar `custom_ops` muda mais que esse op. Proximo passo: acrescentar o caminho
+`fi_` ao bench_gdn ao lado do `fla_` e comparar nas mesmas formas.
