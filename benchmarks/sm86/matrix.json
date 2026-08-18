@@ -1,0 +1,136 @@
+{
+  "_comentario": [
+    "Matriz de medicao. O runner separa cada celula em duas metades:",
+    "  boot.*  decidido na subida do servidor; muda -> outro boot",
+    "  run.*   por requisicao; varia de graca dentro do mesmo boot",
+    "A separacao nao e estetica, e verificavel: veja VALIDACAO em run_matrix.ps1."
+  ],
+  "hardware": {
+    "gpu": "RTX 3090",
+    "vram_bytes": 25769803776,
+    "_nota_vram": "24 GiB. Piso de ~1 GiB fica com Windows/Docker mesmo recem-reiniciado."
+  },
+  "modelo": {
+    "_fonte": "models/awq-w4a16/config.json",
+    "camadas_total": 64,
+    "camadas_full_attention": 16,
+    "camadas_gdn": 48,
+    "kv_heads": 4,
+    "head_dim": 256,
+    "gdn_value_heads": 48,
+    "gdn_key_head_dim": 128,
+    "gdn_value_head_dim": 128,
+    "gdn_conv_kernel": 4,
+    "gdn_ssm_dtype_bytes": 4,
+    "pesos_bytes": 18253611008,
+    "pesos_mtp_bytes": 966367641,
+    "_nota_mtp": [
+      "0,9 GiB. Diferenca medida entre 21,7 GiB (MTP k=2) e 20,8 GiB (sem draft),",
+      "ambos com KV fixado em 1,75 GiB. O modulo MTP e peso, nao cache — some do",
+      "orcamento assim que num_speculative_tokens > 0, e foi justamente esse termo",
+      "faltando que fez a primeira versao desta matriz pedir 65536 de contexto num",
+      "orcamento que nao cabia."
+    ],
+    "_nota_pesos": [
+      "17 GiB. NAO e estimativa de papel: derivado da medicao de 20,8 GiB de VRAM",
+      "total com KV fixado em 1,75 GiB, menos estado GDN e workspace.",
+      "Inclui lm_head em bf16 (esta no ignore do checkpoint, 248320 x 5120 x 2 =",
+      "2,54 GB lidos por token) — por isso o teto de banda cai para ~50 tok/s."
+    ],
+    "workspace_bytes": 1610612736
+  },
+  "compressao_kv": {
+    "auto": 1.0,
+    "turboquant_k8v4": 2.6,
+    "turboquant_4bit_nc": 3.8,
+    "turboquant_k3v4_nc": 3.5,
+    "turboquant_3bit_nc": 4.9
+  },
+  "ancora": {
+    "_proposito": [
+      "Roda identica no inicio E no fim de cada boot. Duas funcoes:",
+      "1. torna celulas de boots diferentes comparaveis (normaliza pela ancora)",
+      "2. o par inicio/fim detecta deriva termica ou disputa de GPU sem oraculo"
+    ],
+    "prompt_tokens": 512,
+    "max_tokens": 128,
+    "temperature": 0,
+    "seed": 1234,
+    "deriva_max_pct": 5.0
+  },
+  "eixos_boot": {
+    "imagem": [
+      "1cat-vllm-sm86:v1.2.2"
+    ],
+    "VLLM_SM86_PN286": [
+      1,
+      0
+    ],
+    "num_speculative_tokens": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "max_model_len": [
+      32768
+    ],
+    "kv_cache_dtype": [
+      "auto"
+    ],
+    "kv_cache_memory_bytes": [
+      2147483648
+    ],
+    "max_num_seqs": [
+      4
+    ],
+    "gpu_memory_utilization": [
+      0.93
+    ]
+  },
+  "eixos_run": {
+    "prompt_tokens": [
+      512,
+      8192,
+      16384,
+      30000
+    ],
+    "max_tokens": [
+      512
+    ],
+    "temperature": [
+      0,
+      0.7
+    ],
+    "seed": [
+      1234
+    ],
+    "_restricao": "prompt_tokens + max_tokens <= max_model_len. 30000+512 = 30512 < 32768.",
+    "_por_que_temperatura": [
+      "Temperatura e eixo de REQUISICAO: 2 valores custam 0 boots a mais, so 2x celulas.",
+      "Sem ela a matriz mede so o regime greedy, que e o mais favoravel ao spec decode:",
+      "com temp 0 o alvo tem uma resposta unica e a aceitacao do draft e a mais alta que",
+      "vai existir. Chat real roda com temperatura, aceita menos, e o ganho de MTP cai.",
+      "Medir so temp 0 nao erra a conta — erra a pergunta.",
+      "Alem disso, a familia inteira de regra de aceitacao (P71 block-verify, PN369",
+      "relaxed) tem gate 'not all_greedy': sob temp 0 ela e inerte por construcao, entao",
+      "sem esse eixo nao ha como nem decidir se vale portar."
+    ]
+  },
+  "_por_que_max_model_len_e_um_valor_so": [
+    "Com kv_cache_memory_bytes FIXADO, o numero de blocos de KV nao depende de",
+    "max_model_len — depende da memoria. Entao subir max_model_len uma vez e",
+    "variar o tamanho do PROMPT mede as mesmas condicoes de cache. Isso converte",
+    "contexto de eixo de boot para eixo de requisicao, e e por isso que 4",
+    "comprimentos de contexto custam 0 boots extras em vez de 3."
+  ],
+  "_por_que_32768_e_nao_65536": [
+    "Aritmetica, nao gosto. Orcamento com MTP ligado:",
+    "  24 GiB x 0,93 = 22,32   - pesos 17,0   - MTP 0,9",
+    "  - estado GDN 4 x 147,75 MiB = 0,58     - workspace 1,5   =  2,34 GiB",
+    "A 64 KiB por token isso da 38.338 tokens. 65536 exigiria 4 GiB e seria",
+    "recusado; 32768 exige 2 GiB e passa com 0,34 GiB de folga.",
+    "Para ir alem: turboquant_4bit_nc (3,8x) levaria 2 GiB a ~124k tokens, mas",
+    "confundiria a variavel de qualidade com o A/B do PN286. Fica para depois."
+  ]
+}

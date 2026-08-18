@@ -1,0 +1,57 @@
+# vLLM 0.27.1 + spec decode sob pipeline parallel, para Qwen3.5 + DSpark.
+#
+# Base: a imagem que ja roda nesta maquina. O fork 1Cat foi abandonado -- o
+# wheel dele traz so cubins sm_70 e nao executa na 3090.
+#
+# Todos os arquivos abaixo sao Python puro, entao overlay resolve: nao ha
+# kernel CUDA novo, e o build leva segundos em vez dos 40-90 min de um build
+# de fonte.
+#
+# Build:
+#   docker build -t qwen38-pp-dspark:0.27.1 \
+#     -f C:\Users\USER\w4a4\vllm-fork\Dockerfile.pp-dspark \
+#     C:\Users\USER\w4a4\vllm-fork
+FROM qwen38-w4a4:latest
+
+ARG SITE=/usr/local/lib/python3.12/dist-packages/vllm
+
+# Sobrepor .py de uma versao sobre outra corrompe ambiente em silencio.
+# Falhar aqui e barato; falhar no boot custa tres minutos.
+RUN python3 -c "\
+import vllm, sys; \
+v = vllm.__version__; \
+sys.exit(0) if v == '0.27.1' else sys.exit('base e vllm %s, o fork e 0.27.1' % v)"
+
+COPY vllm/config/speculative.py ${SITE}/config/
+COPY vllm/config/vllm.py ${SITE}/config/
+COPY vllm/model_executor/models/deepseek_eagle3.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/interfaces.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/laguna_dflash.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/llama.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/llama_eagle3.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/qwen2.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/qwen3_dflash.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/qwen3_dspark.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/qwen3_eagle3.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/qwen3_next.py ${SITE}/model_executor/models/
+COPY vllm/model_executor/models/utils.py ${SITE}/model_executor/models/
+COPY vllm/models/deepseek_v4/nvidia/model.py ${SITE}/models/deepseek_v4/nvidia/
+COPY vllm/models/kimi_k3/nvidia/dspark_mla.py ${SITE}/models/kimi_k3/nvidia/
+COPY vllm/models/kimi_k3/nvidia/model.py ${SITE}/models/kimi_k3/nvidia/
+COPY vllm/v1/worker/gpu/model_runner.py ${SITE}/v1/worker/gpu/
+COPY vllm/v1/worker/gpu/model_states/mamba_hybrid.py ${SITE}/v1/worker/gpu/model_states/
+COPY vllm/v1/worker/gpu/pp_utils.py ${SITE}/v1/worker/gpu/
+COPY vllm/v1/worker/gpu/spec_decode/dflash/utils.py ${SITE}/v1/worker/gpu/spec_decode/dflash/
+COPY vllm/v1/worker/gpu/spec_decode/dspark/utils.py ${SITE}/v1/worker/gpu/spec_decode/dspark/
+COPY vllm/v1/worker/gpu/spec_decode/eagle/eagle3_utils.py ${SITE}/v1/worker/gpu/spec_decode/eagle/
+COPY vllm/v1/worker/gpu/spec_decode/eagle/utils.py ${SITE}/v1/worker/gpu/spec_decode/eagle/
+
+# Os arquivos vem de modulos diferentes e so falham juntos em runtime. Importar
+# aqui transforma erro de boot em erro de build, e confirma que o opt-in que
+# destrava o PP para esta familia sobreviveu ao overlay.
+RUN python3 -c "\
+from vllm.model_executor.models.qwen3_next import Qwen3NextModel as M; \
+import vllm.v1.worker.gpu.model_runner, vllm.v1.worker.gpu.pp_utils; \
+assert M.supports_aux_hidden_states_over_pp is True, 'opt-in nao chegou na imagem'; \
+assert 'update' not in M.forward.__code__.co_names, 'forward nomeia update: quebra sob cudagraph'; \
+print('overlay pp-dspark ok | opt-in ativo | forward limpo')"
