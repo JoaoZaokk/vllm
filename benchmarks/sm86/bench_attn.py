@@ -60,6 +60,42 @@ def time_ms(fn, iters: int, warmup: int) -> float:
     return statistics.median(samples)
 
 
+# Os GEMM que a versao anterior deste arquivo esquecia. O docstring acima sempre
+# disse `attn / (attn + gdn + everything_else)`, mas o codigo dividia so por
+# (attn + gdn) -- e num 27B o "everything_else" e' o termo que domina o prefill.
+# Sem ele a fatia da atencao inflava, exatamente na direcao que fazia o Sage
+# parecer valer a pena.
+#
+# Formas do checkpoint: hidden 5120, intermediate 17408, head_dim 256.
+#   atencao: qkv (24+2*4)*256 = 8192, o_proj 24*256 = 6144
+#   GDN:     qkvz = 2*16*128 + 2*48*128 = 16384, ba = 2*48 = 96, out 48*128 = 6144
+ATTN_GEMMS = [(5120, 8192), (6144, 5120)]
+GDN_GEMMS = [(5120, 16384), (5120, 96), (6144, 5120)]
+MLP_GEMMS = [(5120, 17408), (5120, 17408), (17408, 5120)]
+
+
+def gemm_ms(seqlen: int, dtype, device, iters: int) -> float:
+    """Piso do custo de GEMM do prefill inteiro, em ms.
+
+    PISO, nao estimativa: mede matmul denso em bf16, e o deploy roda AWQ W4A16,
+    que ainda paga a dequantizacao. O numero real e' maior, entao a fatia da
+    atencao calculada contra ele e' um limite SUPERIOR -- que e' o lado seguro
+    para decidir se vale escrever um backend.
+    """
+    total = 0.0
+    for n_camadas, gemms in (
+        (NUM_ATTN_LAYERS, ATTN_GEMMS + MLP_GEMMS),
+        (NUM_GDN_LAYERS, GDN_GEMMS + MLP_GEMMS),
+    ):
+        for entrada, saida in gemms:
+            x = torch.randn(seqlen, entrada, device=device, dtype=dtype)
+            w = torch.randn(entrada, saida, device=device, dtype=dtype)
+            total += n_camadas * time_ms(lambda: torch.matmul(x, w), iters, 3)
+            del x, w
+            torch.cuda.empty_cache()
+    return total
+
+
 def build(seqlen: int, dtype, device):
     q = torch.randn(seqlen, Q_HEADS, HEAD_DIM, device=device, dtype=dtype)
     k = torch.randn(seqlen, KV_HEADS, HEAD_DIM, device=device, dtype=dtype)
@@ -89,7 +125,7 @@ def main():
     print(f"{NUM_ATTN_LAYERS} camadas de atencao, {NUM_GDN_LAYERS} de GDN")
     print(f"q_heads {Q_HEADS}  kv_heads {KV_HEADS}  head_dim {HEAD_DIM}\n")
 
-    print(f"{'seqlen':>7} {'ms/camada':>10} {'ms x16':>9} {'GDN x48':>9} {'attn %':>8} {'teto Sage 2x':>13}")
+    print(f"{'seqlen':>7} {'ms/camada':>10} {'ms x16':>9} {'GDN x48':>9} {'GEMM':>9} {'attn %':>8} {'teto Sage 2x':>13}")
     for s in args.seqlens:
         q, k, v, cu = build(s, dtype, dev)
 
@@ -104,19 +140,33 @@ def main():
         med = time_ms(run, args.iters, max(2, args.iters // 5))
         attn = med * NUM_ATTN_LAYERS
         gdn = GDN_PREFILL_MS.get(s)
+        gemm = gemm_ms(s, dtype, dev, args.iters)
         if gdn:
-            share = 100 * attn / (attn + gdn)
-            # Sage claims ~2x on attention. Even at 2x the saving is bounded by
-            # the share: half of it, and only of the attention half.
-            teto = 100 * (attn / 2) / (attn + gdn)
-            print(f"{s:>7} {med:>10.3f} {attn:>9.2f} {gdn:>9.2f} {share:>7.1f}% {teto:>12.1f}%")
+            denom = attn + gdn + gemm
+            share = 100 * attn / denom
+            # Sage anuncia ~2x na atencao. Mesmo a 2x a economia e' limitada pela
+            # fatia: metade dela, e so' da metade que e' atencao.
+            teto = 100 * (attn / 2) / denom
+            print(
+                f"{s:>7} {med:>10.3f} {attn:>9.2f} {gdn:>9.2f} {gemm:>9.2f}"
+                f" {share:>7.1f}% {teto:>12.1f}%"
+            )
         else:
-            print(f"{s:>7} {med:>10.3f} {attn:>9.2f} {'-':>9} {'-':>8} {'-':>13}")
+            print(
+                f"{s:>7} {med:>10.3f} {attn:>9.2f} {'-':>9} {gemm:>9.2f}"
+                f" {'-':>8} {'-':>13}"
+            )
 
     print(
-        "\nLeitura: 'attn %' e a fatia do prefill que Sage pode tocar; a ultima\n"
-        "coluna e o que sobraria se ela fosse 2x mais rapida (o numero anunciado).\n"
-        "Se essa coluna for pequena, o PR morreu por um bom motivo."
+        "\nLeitura: 'attn %' e a fatia do prefill que Sage pode tocar, agora contra\n"
+        "o denominador inteiro (atencao + GDN + GEMM). A ultima coluna e o que\n"
+        "sobraria se a atencao fosse 2x mais rapida. Se ela for pequena, o PR\n"
+        "morreu por um bom motivo.\n"
+        "\n"
+        "A coluna GEMM e' PISO: matmul denso em bf16, enquanto o deploy paga AWQ\n"
+        "W4A16 com dequantizacao por cima. Logo 'attn %' aqui e' limite SUPERIOR.\n"
+        "A versao anterior deste arquivo omitia essa coluna inteira e inflava a\n"
+        "fatia da atencao em quase uma ordem de grandeza."
     )
 
 

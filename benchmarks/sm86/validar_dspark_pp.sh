@@ -11,10 +11,22 @@
 set -uo pipefail
 
 IMG=${IMG:-qwen38-pp-dspark:0.27.1}
-PART=${PART:-56,8}
+# O drafter mora INTEIRO no ultimo estagio, e so a 3090 tem espaco. Sem esta
+# variavel o dspark_entry.sh escolhe sozinho e poe a 3090 como rank 0 ("3090
+# primeiro"), o que joga o drafter na placa de 12 GB e faz a rodada B nunca
+# subir -- o veredito caia em "incompleto" e a equivalencia greedy, unica coisa
+# capaz de detectar tap faltando ou fora de ordem, nunca era avaliada.
+#
+# Com 1,0 o estagio 0 e' a 3080 Ti, entao a particao poe POUCAS camadas nele.
+# 56,8 so' faria sentido com a 3090 no estagio 0.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,0}"
+PART=${PART:-28,36}
 UTIL=${UTIL:-0.88}
 LEN=${LEN:-32768}
 K=${K:-7}
+# Vazio = comportamento de fabrica. '{"image":0,"video":0}' pula o perfilamento
+# da torre de visao, que aloca o encoder no estagio 0 -- a placa de 12 GB.
+LIMIT_MM=${LIMIT_MM_PER_PROMPT-}
 PROMPT='Escreva uma funcao Python que inverte uma lista ligada. Explique cada passo.'
 OUT=/c/Users/USER/w4a4/validacao_dspark.txt
 : > $OUT
@@ -27,8 +39,10 @@ subir() {  # $1=nome  $2=entry  $3=spec_k
     -v 'C:\Users\USER\w4a4\docker:/opt/qwen38/docker:ro' \
     -e PIPELINE_PARALLEL_SIZE=2 -e VLLM_PP_LAYER_PARTITION="$PART" \
     -e MODEL_PATH=/workspace/models/awq-w4a16 -e QUANTIZATION= \
+    -e CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     -e NUM_SPECULATIVE_TOKENS="$3" -e MAX_MODEL_LEN="$LEN" -e MAX_NUM_SEQS=2 \
     -e GPU_MEMORY_UTILIZATION="$UTIL" -e KV_CACHE_MEMORY_BYTES= \
+    -e LIMIT_MM_PER_PROMPT="$LIMIT_MM" \
     "$IMG" "/opt/qwen38/docker/$2" >/dev/null 2>&1
   for i in $(seq 1 75); do
     curl -s -f http://127.0.0.1:8000/health >/dev/null 2>&1 && return 0
@@ -56,8 +70,12 @@ print(f'aceitos={a:.0f} rascunhos={d:.0f} taxa={a/d:.4f}' if d else 'sem contado
 "
 }
 
+# As DUAS rodadas usam dspark_entry.sh, com k=0 desligando o spec na primeira.
+# Antes A usava awq_entry.sh e B usava dspark_entry.sh: os dois tem defaults
+# diferentes de dtype de cache mamba e montam flags diferentes, entao a
+# comparacao tinha mais de uma variavel e a equivalencia nao provava nada.
 echo "== A: PP=2 sem draft (referencia) ==" | tee -a $OUT
-if subir A awq_entry.sh 0; then
+if subir A dspark_entry.sh 0; then
   gerar > /c/Users/USER/w4a4/saida_sem_draft.json
   echo "  subiu, $(wc -c < /c/Users/USER/w4a4/saida_sem_draft.json) bytes de saida" | tee -a $OUT
 else

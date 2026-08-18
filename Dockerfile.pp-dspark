@@ -3,9 +3,24 @@
 # Base: a imagem que ja roda nesta maquina. O fork 1Cat foi abandonado -- o
 # wheel dele traz so cubins sm_70 e nao executa na 3090.
 #
-# Todos os arquivos abaixo sao Python puro, entao overlay resolve: nao ha
-# kernel CUDA novo, e o build leva segundos em vez dos 40-90 min de um build
-# de fonte.
+# Todos os patches sao Python puro, entao overlay resolve: nao ha kernel CUDA
+# novo, e o build leva segundos em vez dos 40-90 min de um build de fonte.
+#
+# POR QUE A ARVORE INTEIRA, E NAO UMA LISTA DE COPY
+#
+# A versao anterior listava 20 arquivos a mao. Uma auditoria achou o defeito
+# previsivel: `git diff v0.27.1..HEAD --name-only` ja listava 21, e o que faltava
+# era vllm/third_party/flash_linear_attention/ops/utils.py -- justamente o do
+# VLLM_FLA_CHUNK_SIZE. Efeito: dentro do container o boot imprimia
+# "FLA_CHUNK=32" e o kernel rodava 64. Registrar o eixo errado e pior que nao
+# registrar.
+#
+# Lista a mao e um invariante que ninguem mantem. Copiar `vllm/` inteiro elimina
+# a classe: o fork parte da tag v0.27.1 e a base e' 0.27.1, entao todo arquivo
+# nao tocado e' identico byte a byte, e todo arquivo tocado chega. COPY sobrepoe
+# sem apagar, e o .dockerignore ja exclui __pycache__ e *.so, entao as extensoes
+# compiladas da base sobrevivem. `_version.py` e' gerado no build do wheel e nao
+# existe na arvore fonte, logo a versao tambem sobrevive.
 #
 # Build:
 #   docker build -t qwen38-pp-dspark:0.27.1 \
@@ -22,33 +37,38 @@ import vllm, sys; \
 v = vllm.__version__; \
 sys.exit(0) if v == '0.27.1' else sys.exit('base e vllm %s, o fork e 0.27.1' % v)"
 
-COPY vllm/config/speculative.py ${SITE}/config/
-COPY vllm/config/vllm.py ${SITE}/config/
-COPY vllm/model_executor/models/deepseek_eagle3.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/interfaces.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/laguna_dflash.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/llama.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/llama_eagle3.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/qwen2.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/qwen3_dflash.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/qwen3_dspark.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/qwen3_eagle3.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/qwen3_next.py ${SITE}/model_executor/models/
-COPY vllm/model_executor/models/utils.py ${SITE}/model_executor/models/
-COPY vllm/v1/worker/gpu/model_runner.py ${SITE}/v1/worker/gpu/
-COPY vllm/v1/worker/gpu/model_states/mamba_hybrid.py ${SITE}/v1/worker/gpu/model_states/
-COPY vllm/v1/worker/gpu/pp_utils.py ${SITE}/v1/worker/gpu/
-COPY vllm/v1/worker/gpu/spec_decode/dflash/utils.py ${SITE}/v1/worker/gpu/spec_decode/dflash/
-COPY vllm/v1/worker/gpu/spec_decode/dspark/utils.py ${SITE}/v1/worker/gpu/spec_decode/dspark/
-COPY vllm/v1/worker/gpu/spec_decode/eagle/eagle3_utils.py ${SITE}/v1/worker/gpu/spec_decode/eagle/
-COPY vllm/v1/worker/gpu/spec_decode/eagle/utils.py ${SITE}/v1/worker/gpu/spec_decode/eagle/
+COPY vllm/ ${SITE}/
 
-# Os arquivos vem de modulos diferentes e so falham juntos em runtime. Importar
-# aqui transforma erro de boot em erro de build, e confirma que o opt-in que
-# destrava o PP para esta familia sobreviveu ao overlay.
+# Os patches vivem em modulos diferentes e so falham juntos em runtime. Checar
+# aqui transforma erro de boot em erro de build. Um marcador por subsistema
+# tocado -- se o overlay nao chegar em algum, o build para.
 RUN python3 -c "\
+import inspect, os, sys; \
+import vllm; \
+assert vllm.__version__ == '0.27.1', 'overlay mudou a versao: %s' % vllm.__version__; \
+\
 from vllm.model_executor.models.qwen3_next import Qwen3NextModel as M; \
-import vllm.v1.worker.gpu.model_runner, vllm.v1.worker.gpu.pp_utils; \
-assert M.supports_aux_hidden_states_over_pp is True, 'opt-in nao chegou na imagem'; \
+assert M.supports_aux_hidden_states_over_pp is True, 'opt-in de aux tap nao chegou'; \
 assert 'update' not in M.forward.__code__.co_names, 'forward nomeia update: quebra sob cudagraph'; \
-print('overlay pp-dspark ok | opt-in ativo | forward limpo')"
+\
+from vllm.model_executor.models import interfaces; \
+assert hasattr(interfaces.EagleModelMixin, 'recv_remote_aux_from_producers'), 'mixin de PP sem recv'; \
+assert hasattr(interfaces.EagleModelMixin, 'pack_local_aux_for_last'), 'mixin de PP sem pack'; \
+\
+import vllm.v1.worker.gpu.model_runner; \
+import vllm.v1.worker.gpu.pp_utils; \
+import vllm.v1.worker.gpu.model_states.mamba_hybrid; \
+import vllm.v1.worker.gpu.spec_decode.dspark.utils; \
+import vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils; \
+\
+src = inspect.getsource(sys.modules['vllm.third_party.flash_linear_attention.ops.utils']); \
+assert 'VLLM_FLA_CHUNK_SIZE' in src, 'override do chunk size nao chegou na imagem'; \
+print('overlay pp-dspark ok | opt-in ativo | forward limpo | mixin PP | chunk size ajustavel')"
+
+# O override so' vale se o valor pedido realmente virar o tile. Subprocesso
+# porque FLA_CHUNK_SIZE liga no import e nao pode ser reavaliado no mesmo
+# processo -- que e' exatamente o motivo de o bench varrer por subprocesso.
+RUN VLLM_FLA_CHUNK_SIZE=32 python3 -c "\
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE as c; \
+assert c == 32, 'VLLM_FLA_CHUNK_SIZE inerte na imagem: leu %s' % c; \
+print('chunk size responde ao ambiente')"
