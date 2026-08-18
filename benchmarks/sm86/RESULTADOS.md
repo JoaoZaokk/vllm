@@ -309,3 +309,74 @@ checkpoint e reduzindo o desperdicio de bloco parcial.
 Mas isso exige dtype que nao existe no enum mais load/store nos kernels Triton do
 FLA mais gestao de escala. E projeto, nao knob. Fica registrado como o argumento
 certo caso alguem volte ao assunto.
+
+## O estado do GDN e uma contracao — quanto tempo o erro sobrevive nele
+
+`analise_decay_gdn.py`, so CPU, segundos, le direto do checkpoint.
+
+O argumento "recorrencia acumula erro, entao esqueca sub-16-bit" que escrevi acima
+esta forte demais, e o codigo diz por que. O gate do GDN e
+
+    fused_gdn_gating_kernel:  blk_g = -exp(A_log) * softplus_x
+
+com `exp(A_log) > 0` e `softplus > 0`. Logo **g < 0 sempre** e `exp(g)` esta em
+(0,1) estritamente. O estado nao e um acumulador: e uma contracao, por construcao.
+Erro injetado num passo DECAI nos seguintes.
+
+`A_log` e `dt_bias` estao no checkpoint sem quantizacao (96 tensores, 48 camadas
+x 2). No ponto de operacao a=0:
+
+| | decay exp(g) | meia-vida do erro |
+|---|---|---|
+| min | 0,000117 | 0,1 passo |
+| p1 | 0,040 | 0,2 |
+| **mediana** | **0,973151** | **25,5 passos** |
+| p99 | 0,999731 | 2.574 |
+| max | 0,999962 | 18.132 |
+
+Para o head mediano o erro some em 25 tokens, nao em 8.000. A premissa do
+argumento padrao nao vale aqui.
+
+Mas meia-vida e a leitura errada. O que decide e a amplificacao em regime
+permanente, `1/(1-d^2)`, porque a amplitude cresce com a raiz dela. int8 injeta
+~0,4% por passo:
+
+| | decay | amplitude | erro final |
+|---|---|---|---|
+| mediana | 0,973151 | 4,3x | **1,7%** |
+| limiar lento | 0,999 | 22,4x | 8,9% |
+| p99 | 0,999731 | 43,1x | 17,2% |
+| pior head | 0,999962 | 114,4x | **45,7%** |
+
+Ou seja: **o head mediano aguenta int8 com folga; o pior head e destruido**. Nao e
+uma decisao por modelo, e por head. Isso e exatamente a tese do paper de
+sensibilidade KL (arXiv 2604.13440) para hibridos SSM+Transformer -- so que aqui a
+sensibilidade nao precisa de calibracao nem de forward: sai de `A_log` e `dt_bias`,
+que sao pesos.
+
+### Por que a versao barata nao paga
+
+341 de 2.304 heads (14,8%) tem decay > 0,999. Estao espalhados: so **7 das 48
+camadas** nao tem nenhum. Decidir por camada obrigaria a manter 41 camadas em
+bf16 -- nao compra nada.
+
+Por head, sim: 0,574x o estado de hoje, o que levaria o block size de 448 para
+~257 e dobraria quase a frequencia de checkpoint do prefix caching em modo
+`align`. Mas exige dtype por head dentro do mesmo tensor, nos kernels Triton do
+FLA. E projeto.
+
+### Ressalva que nao pode sumir
+
+Tudo isso e em `a = 0`. O termo dependente da entrada desloca: `a` positivo faz
+softplus crescer, g ficar mais negativo, memoria ENCURTAR (melhor para
+quantizacao); `a` negativo faz o contrario. E referencia, nao limite. Medir o `a`
+real exige hook num forward de verdade, e e o proximo passo se alguem retomar.
+
+### Credito
+
+Achado a partir do argumento de bounded range do
+[relu-clip](https://huggingface.co/jiaheguo521/relu-clip): "the unbounded ResNets
+reach only 0.045-0.147 -- the two groups do not overlap. In int8 codes that is 256
+of 256 against 61-218". O que faz int8 funcionar la e a faixa limitada, nao o
+quantizador. A pergunta certa aqui virou "o estado do GDN tem faixa limitada?", e
+o gate responde que sim.
