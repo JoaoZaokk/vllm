@@ -35,9 +35,6 @@ COPY vllm/model_executor/models/qwen3_dspark.py ${SITE}/model_executor/models/
 COPY vllm/model_executor/models/qwen3_eagle3.py ${SITE}/model_executor/models/
 COPY vllm/model_executor/models/qwen3_next.py ${SITE}/model_executor/models/
 COPY vllm/model_executor/models/utils.py ${SITE}/model_executor/models/
-COPY vllm/models/deepseek_v4/nvidia/model.py ${SITE}/models/deepseek_v4/nvidia/
-COPY vllm/models/kimi_k3/nvidia/dspark_mla.py ${SITE}/models/kimi_k3/nvidia/
-COPY vllm/models/kimi_k3/nvidia/model.py ${SITE}/models/kimi_k3/nvidia/
 COPY vllm/v1/worker/gpu/model_runner.py ${SITE}/v1/worker/gpu/
 COPY vllm/v1/worker/gpu/model_states/mamba_hybrid.py ${SITE}/v1/worker/gpu/model_states/
 COPY vllm/v1/worker/gpu/pp_utils.py ${SITE}/v1/worker/gpu/
