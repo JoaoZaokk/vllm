@@ -505,3 +505,134 @@ arquivo saiu da lista sem ninguem notar.
 - `align` ja ligado nos entrypoints e `all` proibido para Qwen3.5: leitura de codigo.
 - PP=2 AWQ sem draft, 56/8, 65.536 tokens a 37,88 tok/s: usou `awq_entry.sh`, cuja
   expansao de KV respeita vazio. Nao caiu na armadilha do `:-`.
+
+# REMEDIDO 18/ago/2026, depois da auditoria
+
+Instrumentos corrigidos, imagem reconstruida, placa livre. Isto substitui o que
+ficou riscado acima.
+
+## Piso de ruido, medido de graca
+
+A varredura de chunk size mexeu num knob que o kernel de DECODE nao enxerga --
+`fused_sigmoid_gating_delta_rule_update` nao recebe chunk_size. Ainda assim a
+coluna de decode andou:
+
+    chunk 16 -> 0,0420 ms/camada
+    chunk 32 -> 0,0389
+    chunk 64 -> 0,0349
+
+20% de espalhamento num eixo que nao existe. **Diferenca menor que ~20% na coluna
+de decode nao e sinal.** Vale para tudo abaixo.
+
+## GDN no decode: 8,5%, nao 27,8%
+
+Caminho de producao (`fused_sigmoid_gating_delta_rule_update`), 3090, bf16:
+
+| seqs | ms/camada | ms x48 | limite superior |
+|---|---|---|---|
+| 1 | 0,0399 | 1,92 | **8,5%** |
+| 2 | 0,0553 | 2,65 | 11,8% |
+| 4 | 0,0812 | 3,90 | 17,4% |
+| 8 | 0,1101 | 5,28 | 23,6% |
+
+O numero riscado dizia 27,8% com uma sequencia. O real e 8,5% -- **o teto do que
+qualquer tuning de GDN pode comprar no decode caiu para menos de um terco**.
+
+Isso encerra a familia SNDR de vez, com aritmetica em vez de opiniao: acelerar o
+GDN em 20% compra 1,7% do token. Nao vale uma semana, nao vale um dia.
+
+"Limite superior" continua sendo o rotulo certo: numerador eager e camada
+isolada, denominador e token de servidor com CUDA graph.
+
+Comparacao com o kernel fora do caminho, na mesma rodada e mesmas formas:
+
+    producao (fused_sigmoid_gating)  0,0399 ms  <- 40% MAIS RAPIDO
+    legado (fused_recurrent)         0,0660 ms
+
+Ou seja, o bench antigo nao so media o kernel errado: media um kernel mais lento,
+e por isso o custo do GDN parecia maior do que e.
+
+## Atencao no prefill: 3,6%, nao 55,1%
+
+Com o denominador completo (atencao + GDN + GEMM), 16 camadas de atencao contra
+48 de GDN e os GEMM de todas as 64:
+
+| seqlen | atencao x16 | GDN x48 | GEMM | attn % | teto Sage 2x |
+|---|---|---|---|---|---|
+| 2.048 | 16,62 | 44,04 | 1.450,36 | **1,1%** | 0,6% |
+| 8.192 | 215,48 | 178,81 | 5.604,63 | **3,6%** | 1,8% |
+| 32.768 | 3.735,91 | — | 21.413,10 | ~14,9% | ~7,4% |
+
+O riscado dizia 55,1% em 8k. O real e 3,6%: **inflacao de 15x**, dentro da faixa
+que a auditoria previu, e na direcao que fazia o Sage parecer valer a pena.
+
+Com isso a resposta que este repositorio da para vllm#10532 muda de lado. Eu
+tinha escrito "sim para contexto longo". Esta errado em 8k: um backend 2x mais
+rapido na atencao compra 1,8% do prefill. Em 32k a fracao sobe para ~15% e um 2x
+compraria ~7%, o que ja nao e desprezivel -- mas o PR morreu por um bom motivo
+para o regime em que quase todo mundo roda.
+
+A conclusao alternativa continua de pe e nao dependia disso: Sage recusa
+`head_dim > 128` nas cinco variantes, e o nosso e 256.
+
+GEMM aqui e PISO -- matmul denso bf16, enquanto o deploy paga AWQ W4A16 com
+dequantizacao. Logo a fatia da atencao e limite SUPERIOR.
+
+## FlashInfer no GDN: alavanca MORTA, confirmado na maquina
+
+    2048  fi  --  NotImplementedError: GDN prefill DSL kernel is unavailable
+
+O portao de arquitetura estava certo. Nao e que o kernel seja lento em sm_86: ele
+nao existe para esta placa. Pergunta encerrada, sem patch no resolver.
+
+O bench chegou a 8192 e imprimiu as duas linhas de fla. Antes desta correcao o
+`break` dentro do `except` teria abortado a varredura inteira e sumido com a
+linha de 8192 sem uma palavra. A correcao se provou na primeira execucao.
+
+## Chunk size: 64 ja e o otimo, e 128 e ILEGAL
+
+Prefill 8192, ms x48:
+
+| chunk | fla | fla+cu |
+|---|---|---|
+| 16 | 212,92 | 212,83 |
+| 32 | 174,10 | 170,70 |
+| **64 (default)** | **172,30** | 178,24 |
+| 128 | AssertionError | — |
+
+16 e claramente pior (+23%). Entre 32 e 64 nao ha vencedor: a ordem se INVERTE
+entre as duas colunas da mesma rodada, o que e a assinatura de ruido, nao de
+efeito.
+
+E ha um teto rigido que eu tinha afirmado nao existir. Escrevi que "nenhum assert
+na arvore fixa 64". Fixa: `solve_tril.py:531` tem
+
+    assert A.shape[-1] in [16, 32, 64]
+
+Entao 128 nem chega a compilar -- morre em assercao Python, nao em shared memory
+como eu previa. O espaco util do knob e {16, 32, 64}, e o default ja esta no
+melhor dos tres.
+
+A infraestrutura do knob fica: e barata, esta correta, e o eixo agora aparece no
+log de boot de verdade (a imagem carrega o patch depois da correcao do
+Dockerfile). Mas a alavanca nao tem o que comprar.
+
+## O que sobreviveu da serie antiga
+
+O GDN no PREFILL. O caminho de chunk E' o de producao (`forward_native` ->
+`fla_chunk_gated_delta_rule`), entao aquele numero sempre mediu o kernel certo:
+
+    antes  178,84 ms em 8192
+    agora  172,30 a 179,18 ms
+
+Dentro do ruido. Era so' o DECODE que estava medindo outra coisa.
+
+## Onde isso deixa a fila
+
+Tres alavancas de GDN mortas por medicao, nao por palpite: SNDR (teto de 8,5%),
+FlashInfer (kernel inexistente em sm_86), chunk size (64 ja e o otimo de tres
+valores legais). Sage morto por `head_dim`.
+
+O que sobra e o que sempre foi: **contexto e o drafter**. GEMM e' 5,6 s dos 6,0 s
+de prefill em 8k -- 94%. Qualquer ganho serio de TTFT esta na quantizacao dos
+GEMM, nao em kernel de atencao nem de recorrencia.

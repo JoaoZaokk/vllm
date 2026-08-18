@@ -41,8 +41,10 @@ NUM_ATTN_LAYERS = 16
 NUM_GDN_LAYERS = 48
 Q_HEADS, KV_HEADS, HEAD_DIM = 24, 4, 256
 
-# From bench_gdn.py on this GPU, same dtype, 48 layers total.
-GDN_PREFILL_MS = {2048: 47.15, 8192: 178.84}
+# Do bench_gdn.py nesta GPU, mesmo dtype, 48 camadas, caminho de chunk (que E'
+# o de producao no prefill: forward_native -> fla_chunk_gated_delta_rule).
+# Remedido 18/ago/2026 depois de tirar o inspect.signature da janela de tempo.
+GDN_PREFILL_MS = {2048: 44.04, 8192: 178.81}
 
 
 def time_ms(fn, iters: int, warmup: int) -> float:
