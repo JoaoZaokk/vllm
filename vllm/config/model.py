@@ -451,27 +451,17 @@ class ModelConfig:
         # affects the computation graph of the language model, therefore we add it
         # here early.
         if self.multimodal_config:
-            mm_config = self.multimodal_config
-            # These three decide whether the multimodal path is active, and with it
-            # whether the language model is handed inputs_embeds or None. They are
-            # deliberately NOT collapsed into one factor: language_model_only also
-            # switches the fused QK-norm/RoPE/gate kernel in Qwen3Next, so a run that
-            # reaches text-only by zeroing limits does not have the same graph as one
-            # that passes the flag, and the two must stay distinguishable.
+            # Whether the multimodal path is active decides whether the language
+            # model is handed inputs_embeds or None, so it belongs in the key.
+            # The fields that decide it are enumerated by the config that owns
+            # them, not copied here, because a copy goes stale silently.
             #
-            # supports_multimodal_inputs is the predicate that actually matters, but
-            # it needs the processing info and cannot be called from here, so this
-            # mirrors its inputs instead. It errs toward over-invalidation: zeroing
-            # one modality of several, or naming one the model does not support,
-            # changes the key without changing the graph. An extra compile is cheap;
-            # serving a graph that was built under the other branch is not.
-            factors["language_model_only"] = mm_config.language_model_only
-            factors["enable_mm_embeds"] = mm_config.enable_mm_embeds
-            factors["mm_zeroed_modalities"] = sorted(
-                modality
-                for modality in mm_config.limit_per_prompt
-                if mm_config.get_limit_per_prompt(modality) == 0
-            )
+            # Kept as separate factors rather than one boolean: language_model_only
+            # also switches the fused QK-norm/RoPE/gate kernel in Qwen3Next, so two
+            # runs that both end up text-only do not share a graph. Errs toward
+            # over-invalidation -- an extra compile is cheap, serving a graph built
+            # under the other branch is not.
+            factors["mm_graph"] = self.multimodal_config.graph_factors()
         return hash_factors(factors)
 
     def _update_nested(
