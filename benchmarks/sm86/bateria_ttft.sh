@@ -27,6 +27,10 @@ RAIZ_MNT="$(cd "$RAIZ" && (pwd -W 2>/dev/null || pwd))"
 NOME=bateria
 PORTA=8010
 OUT="$RAIZ/resultados_ttft.jsonl"
+# `tee -a` acumula. Sem truncar, uma rodada interrompida mais um rerun
+# deixam a mesma celula duas vezes no arquivo, sem carimbo que as separe,
+# e quem agrega depois nao tem como saber qual e' de quando.
+: > "$OUT"
 OUT_MNT="$RAIZ_MNT/resultados_ttft.jsonl"
 LOGS="$RAIZ/logs"
 mkdir -p "$LOGS"

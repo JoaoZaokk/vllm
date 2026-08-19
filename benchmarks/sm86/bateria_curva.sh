@@ -16,10 +16,14 @@ PORTA=8013
 CACHE="${PREFIX_CACHING:-0}"
 OUT="$RAIZ/resultados_curva${CACHE:+_cache$CACHE}.jsonl"
 mkdir -p "$RAIZ/logs"
-: > "$OUT"
 
 gpu_lock_pegar "curva-g-cache$CACHE" 0 || exit 1
 trap gpu_lock_soltar EXIT
+
+# Truncar DEPOIS de pegar o lock. Perder a corrida pelo lock ainda destruia o
+# resultado da execucao anterior, e a raiz da stack nao e' repositorio git --
+# nao havia de onde recuperar.
+: > "$OUT"
 
 CONFIGS=(
   "marlin|awq_entry.sh|/workspace/models/awq-w4a16|"
@@ -72,6 +76,18 @@ for l in open(sys.argv[1], encoding="utf-8"):
         d.setdefault(r["config"], {})[r["g"]] = r
 
 gs = sorted(set().union(*[set(v) for v in d.values()])) if d else []
+
+# Sem ponto COMPARAVEL nao ha conclusao a tirar. A versao anterior imprimia
+# "ConvRot ganha em TODOS os G medidos" com o arquivo vazio -- afirmacao
+# categorica sobre zero medicao, no bloco que decide a escolha de modelo do
+# projeto. O bateria_2x2 ja tinha essa guarda; este nao.
+pares = [g for g in gs if d.get("marlin", {}).get(g) and d.get("convrot", {}).get(g)]
+if not pares:
+    print()
+    print(f"  SEM VEREDITO: {len(gs)} valores de G no arquivo, nenhum com os dois")
+    print("  caminhos medidos. Nada a comparar -- conferir o log das subidas.")
+    raise SystemExit(1)
+
 print(f"{'G':>5}{'marlin ms':>12}{'convrot ms':>12}{'razao':>9}{'ruido':>8}")
 virou = None
 for g in gs:

@@ -11,10 +11,19 @@ set -uo pipefail
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="$RAIZ/logs/final_$(date +%H%M%S).log"
 mkdir -p "$RAIZ/logs"
+# rc coletado E TESTADO. A versao anterior imprimia o rc de cada passo e nunca
+# olhava para ele: passo 3 morria, a fila seguia, e a ultima linha dizia
+# COMPLETA. Nao havia como distinguir uma fila que rodou de uma que caiu no
+# primeiro item -- e a fila roda de madrugada, sem ninguem lendo o meio do log.
+FALHAS=()
 passo() { local n="$1"; shift; echo | tee -a "$LOG"
   echo "########## $n ($(date +%H:%M:%S)) ##########" | tee -a "$LOG"
   "$@" 2>&1 | tee -a "$LOG"
-  echo "########## $n rc=${PIPESTATUS[0]} ##########" | tee -a "$LOG"; }
+  rc=${PIPESTATUS[0]}
+  echo "########## $n rc=$rc ##########" | tee -a "$LOG"
+  [ "$rc" -ne 0 ] && FALHAS+=("$n (rc=$rc)")
+  return 0
+}
 
 # PART/PARTICAO nao sao lidos por ninguem: o script le
 # VLLM_PP_LAYER_PARTITION, carregado de baseline_congelado.env. O valor
@@ -31,4 +40,11 @@ passo "2/2 os cinco testes do fork" \
     v1/worker/test_spec_decode_embed_sharing_pp.py \
     v1/e2e/spec_decode/eagle/test_eagle3_pp.py
 
-echo "===== FINAL COMPLETO =====" | tee -a "$LOG"
+if [ ${#FALHAS[@]} -eq 0 ]; then
+  echo "===== FINAL COMPLETO — log em $LOG =====" | tee -a "$LOG"
+else
+  echo "===== FINAL INCOMPLETO: ${#FALHAS[@]} passo(s) falharam — log em $LOG =====" | tee -a "$LOG"
+  printf '  %s
+' "${FALHAS[@]}" | tee -a "$LOG"
+  exit 1
+fi

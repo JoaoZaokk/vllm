@@ -29,10 +29,14 @@ PORTA=8012
 OUT="$RAIZ/resultados_2x2.jsonl"
 OUT_MNT="$RAIZ_MNT/resultados_2x2.jsonl"
 mkdir -p "$RAIZ/logs"
-: > "$OUT"
 
 gpu_lock_pegar "bateria-2x2" 0 || exit 1
 trap gpu_lock_soltar EXIT
+
+# Truncar DEPOIS de pegar o lock. Perder a corrida pelo lock ainda destruia o
+# resultado da execucao anterior, e a raiz da stack nao e' repositorio git --
+# nao havia de onde recuperar.
+: > "$OUT"
 
 #  nome | entrypoint | modelo | eager
 CELULAS=(

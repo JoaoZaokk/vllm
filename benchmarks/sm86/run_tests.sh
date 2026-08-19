@@ -67,10 +67,19 @@ ALVO=("$@")
 
 # -rs lista o motivo de cada skip: e' o que separa "passou" de "nem rodou".
 # O status do pytest sai inteiro porque nao ha pipe depois dele.
-# `exec` substitui o processo: o trap EXIT nao dispara e o lock vazaria.
-# Soltar aqui, porque daqui o script nao volta.
-gpu_lock_soltar
-trap - EXIT
-MSYS_NO_PATHCONV=1 exec docker run --rm "${ARGS[@]}" \
+# NAO usar `exec` aqui. Ele substitui o processo, o trap EXIT nunca dispara, e o
+# lock vazaria -- foi por isso que a versao anterior soltava o lock ANTES desta
+# linha. So que soltar antes e' pior que vazar: o lock ficava livre enquanto o
+# container ainda tinha a placa inteira, e a outra sessao arrancava por cima de
+# uma GPU ocupada. Lock livre com placa ocupada e' uma afirmacao falsa.
+#
+# Sem `exec`, o docker run termina, o script continua, o trap dispara e o lock
+# sai DEPOIS que a placa esta mesmo livre. O custo e' um processo bash parado
+# durante a suite.
+MSYS_NO_PATHCONV=1 docker run --rm "${ARGS[@]}" \
   --entrypoint bash qwen38-w4a4:latest -c \
   "pip install -q pytest tblib >/dev/null 2>&1; cd /tests && python3 -m pytest ${ALVO[*]} -q --no-header -rs -p no:cacheprovider"
+rc=$?
+# O status do pytest e' o status do script. Sem esta linha o `exit` implicito
+# devolveria o do ultimo comando executado -- que seria o trap.
+exit $rc
