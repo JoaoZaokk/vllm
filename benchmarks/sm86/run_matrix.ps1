@@ -245,6 +245,44 @@ Write-Host ""
 
 if ($Plan) { Write-Host "modo -Plan: nada foi executado."; return }
 
+# ---------------------------------------------------------------------------
+# ARNES LEGADO -- recusa executar por padrao.
+#
+# Daqui para baixo este script sobe container com `docker run -d --gpus all` e
+# NAO passa pelo lock da GPU. Duas sessoes dividem a mesma placa; uma medicao
+# concorrente nao da erro, da um numero errado com cara de certo.
+#
+# Nao ganhou um lock proprio de proposito: uma terceira implementacao de
+# exclusao mutua nao e exclusao mutua. Quem coordena a placa e o controlador.
+#
+# Alem do lock, herda os defeitos ja mapeados do arnes antigo: porta fixa em vez
+# de sorteada, lista de -e escrita a mao, e identidade do servidor por porta.
+#
+# O caminho conferido e:
+#
+#     ./lab run <perfil> <tarefa>
+#
+# `-Plan` continua livre: ele so imprime o plano e nao sobe nada.
+#
+# Para executar assim mesmo:
+#
+#     $env:LAB_ARNES_LEGADO = "1"; pwsh -File run_matrix.ps1
+#
+if ($env:LAB_ARNES_LEGADO -ne "1") {
+    Write-Error @"
+RECUSADO: arnes legado, sem lock da GPU.
+
+Este script sobe container com --gpus all sem passar pelo lock. Com outra
+sessao na mesma placa, o resultado e um numero contaminado que nao se anuncia.
+
+Use:  ./lab run <perfil> <tarefa>
+Plano sem executar:  pwsh -File run_matrix.ps1 -Plan
+Executar assim mesmo:  `$env:LAB_ARNES_LEGADO = "1"
+"@
+    exit 78
+}
+# ---------------------------------------------------------------------------
+
 # --------------------------------------------------------------- execucao
 function Wait-Ready($timeout) {
     $t0 = Get-Date
