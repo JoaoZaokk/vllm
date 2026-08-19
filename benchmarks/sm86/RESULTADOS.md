@@ -1369,10 +1369,42 @@ Escrever nao basta; rodar as tres formas de uso encontrou:
      ao comportamento de fabrica em silencio, reproduzindo o bug que o arquivo
      existe para impedir. Trocado por `${VAR+definida}`, que separa "nao
      definida" de "definida vazia" e preserva a valvula de escape.
-  2. `MAX_MODEL_LEN=10240 . baseline.env` NAO sobrescreve. O bash fora do modo
-     posix nao preserva atribuicao prefixada ao builtin `.`. So' funciona
-     `export MAX_MODEL_LEN=10240; . baseline.env`. Documentado no arquivo.
+  2. `MAX_MODEL_LEN=10240 . baseline.env` falha de um jeito pior do que "nao
+     sobrescreve", e a diferenca importa:
+
+         dentro, antes do export:   10240
+         dentro, depois do export:  10240
+         DEPOIS do source:          <indefinida>
+
+     O valor E' visto durante o source e o `export` interno chega a assumi-lo;
+     tudo desaparece quando o builtin retorna, porque o bash fora do modo posix
+     restaura o estado anterior a' atribuicao prefixada, export inclusive. A
+     forma errada FUNCIONA exatamente onde voce olharia para conferir e falha
+     onde o script usa a variavel. So' `export VAR=x; . baseline.env` persiste.
   3. Ambos passaram em `bash -n`. Sintaxe valida, semantica errada -- de novo.
+
+## `baseline_mostrar`: carregar o arquivo nao basta
+
+Carregar o `.env` impede a divergencia; nao impede alguem ler so' o nome do
+script daqui a tres dias e assumir a configuracao. Entao o baseline RESOLVIDO
+vai para o log e para o arquivo de resultado, nao so' para a memoria do shell:
+
+    === BASELINE RESOLVIDO ===
+    TARGET=/workspace/models/awq-w4a16
+    DRAFT=/workspace/models/dspark-qwen38-w4a4
+    PART=16,48   LEN=8192   K=7   UTIL=0.88
+    LIMIT_MM={"image":0,"video":0}
+    ==========================
+
+Duas linhas dizem a verdade em vez de mostrar valor cru, que e' onde os dois
+bugs moravam:
+
+    KV_BYTES=<dimensionar>                       vazio nao e' zero
+    LIMIT_MM=<fabrica: multimodal LIGADO>        vazio e' a config que MORREU
+
+Rodando a combinacao que matou as quatro tentativas, o banner a delata em duas
+linhas antes de qualquer container subir. Custo: uma funcao no `.env`, uma
+chamada no script. Zero divida de harness.
 
 ## A Fase 6 nao precisa de instalacao nenhuma
 

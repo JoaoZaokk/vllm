@@ -112,7 +112,7 @@ print(f'aceitos={a:.0f} rascunhos={d:.0f} taxa={a/d:.4f}' if d else 'sem contado
 # Antes A usava awq_entry.sh e B usava dspark_entry.sh: os dois tem defaults
 # diferentes de dtype de cache mamba e montam flags diferentes, entao a
 # comparacao tinha mais de uma variavel e a equivalencia nao provava nada.
-echo "config: PART=$PART LEN=$LEN K=$K draft=$DRAFT limit_mm=${LIMIT_MM:-<vazio>}" | tee -a $OUT
+baseline_mostrar "$OUT"
 echo "== A: PP=2 sem draft (referencia) ==" | tee -a $OUT
 rodada=A
 if subir A dspark_entry.sh 0; then
