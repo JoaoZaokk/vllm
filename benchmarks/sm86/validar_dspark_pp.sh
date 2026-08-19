@@ -138,9 +138,9 @@ fi
 docker logs val > "$STACK/logs/validar_${rodada:-x}.log" 2>&1 || true
 docker rm -f val >/dev/null 2>&1
 
-echo "== B: PP=2 + DSpark k=$K ==" | tee -a $OUT
+echo "== B: PP=2 + DSpark k=$NUM_SPECULATIVE_TOKENS ==" | tee -a $OUT
 rodada=B
-if subir B dspark_entry.sh "$K"; then
+if subir B dspark_entry.sh "$NUM_SPECULATIVE_TOKENS"; then
   gerar > "$SAIDA_SPEC"
   echo "  subiu | $(aceitacao)" | tee -a $OUT
 else

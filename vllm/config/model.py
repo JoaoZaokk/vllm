@@ -452,15 +452,21 @@ class ModelConfig:
         # here early.
         if self.multimodal_config:
             mm_config = self.multimodal_config
+            # These three decide whether the multimodal path is active, and with it
+            # whether the language model is handed inputs_embeds or None. They are
+            # deliberately NOT collapsed into one factor: language_model_only also
+            # switches the fused QK-norm/RoPE/gate kernel in Qwen3Next, so a run that
+            # reaches text-only by zeroing limits does not have the same graph as one
+            # that passes the flag, and the two must stay distinguishable.
+            #
+            # supports_multimodal_inputs is the predicate that actually matters, but
+            # it needs the processing info and cannot be called from here, so this
+            # mirrors its inputs instead. It errs toward over-invalidation: zeroing
+            # one modality of several, or naming one the model does not support,
+            # changes the key without changing the graph. An extra compile is cheap;
+            # serving a graph that was built under the other branch is not.
             factors["language_model_only"] = mm_config.language_model_only
-            # There are two ways to reach text-only mode and they must be
-            # indistinguishable to the cache key, because they are
-            # indistinguishable to the model: pinning every modality to zero
-            # through limit_mm_per_prompt makes supports_multimodal_inputs
-            # return False exactly as this flag does, which changes whether the
-            # language model is handed inputs_embeds or None. limit_mm_per_prompt
-            # itself stays in ignored_factors: a limit of one versus two does not
-            # touch the graph, only a limit of zero does.
+            factors["enable_mm_embeds"] = mm_config.enable_mm_embeds
             factors["mm_zeroed_modalities"] = sorted(
                 modality
                 for modality in mm_config.limit_per_prompt
