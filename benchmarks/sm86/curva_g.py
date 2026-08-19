@@ -6,9 +6,25 @@ saida resolvendo `TTFT + G/taxa` com dois pontos medidos. Dois pontos nao fazem
 curva -- a taxa de decode nao precisa ser constante em G, e o TTFT dos dois
 caminhos tem ruido diferente (o do ConvRot oscila 12-17%, o do Marlin 0,2%).
 
-Aqui o eixo G e' varrido de verdade, com prompt identico, greedy, cache de
-prefixo DESLIGADO no servidor. O que sai e' tempo total por requisicao -- que e'
-o que o usuario espera de fato, nao TTFT nem tok/s isolados.
+Aqui o eixo G e' varrido de verdade, com prompt identico e greedy. O que sai e'
+tempo total por requisicao -- que e' o que o usuario espera de fato, nao TTFT
+nem tok/s isolados.
+
+O CACHE DE PREFIXO MUDA O QUE ISTO MEDE, e o numero nao se anuncia:
+
+  frio (PREFIX_CACHING=0)  prefill inteiro em toda requisicao. E o que este
+                           docstring sempre descreveu.
+  quente (=1)              o prompt e' prompt_de(80, "fixa") -- IDENTICO em
+                           todo G e toda repeticao dentro do mesmo boot. Da
+                           segunda requisicao em diante o prefill e pulado por
+                           completo. Isto mede REPETICAO VERBATIM, que e' o teto
+                           do beneficio de cache, e NAO o reuso de prefixo que
+                           um agente de codigo produz.
+
+Por isso cada linha do jsonl carrega o regime: numero de um arquivo nao pode
+depender de lembrar como a fila foi chamada. O regime do agente -- prefixo
+grande cacheado mais cauda nova por turno -- e um benchmark que ainda nao
+existe (C-003 no registro de evidencia).
 
 Repeticoes por ponto porque o ConvRot e ruidoso: mediana de N, nao uma amostra.
 """
@@ -16,6 +32,7 @@ Repeticoes por ponto porque o ConvRot e ruidoso: mediana de N, nao uma amostra.
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import sys
 import time
@@ -74,6 +91,14 @@ if __name__ == "__main__":
         d = amostras[-1][1]
         print(json.dumps({
             "config": rotulo, "g": g,
+            # O regime vem do ambiente porque quem o escolhe e a bateria. Grava-lo
+            # aqui torna cada linha auto-descritiva: numero de um arquivo nao pode
+            # depender de lembrar como a fila foi chamada tres dias atras.
+            "prefix_caching": os.environ.get("PREFIX_CACHING", "0"),
+            "regime": ("quente: prompt identico, prefill pulado da 2a requisicao "
+                       "em diante -- mede repeticao verbatim"
+                       if os.environ.get("PREFIX_CACHING", "0") not in ("", "0")
+                       else "frio: prefill inteiro em toda requisicao"),
             "total_ms": round(ms, 1),
             "gerados": d["usage"]["completion_tokens"],
             "prompt_tokens": d["usage"]["prompt_tokens"],

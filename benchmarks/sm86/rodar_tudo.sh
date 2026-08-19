@@ -33,7 +33,18 @@ passo() {  # $1=nome  resto=comando
 }
 
 passo "1/5 curva com cache LIGADO" \
-  env PREFIX_CACHING=1 bash "$RAIZ/bateria_curva.sh"
+  # PREFIX_CACHING=1 contradiz o docstring do curva_g.py, que declara o
+  # cache de prefixo DESLIGADO. E o prompt la e prompt_de(80, "fixa") --
+  # IDENTICO em todo G e toda repeticao dentro do mesmo boot. Com cache
+  # ligado, da segunda requisicao em diante o prefill e pulado inteiro:
+  # isto mede REPETICAO VERBATIM, que e o teto do beneficio de cache, e
+  # nao reuso de prefixo como um agente de codigo produz.
+  #
+  # O regime util para decidir Marlin x ConvRot -- prefixo grande cacheado
+  # mais cauda nova por turno -- nao existe ainda (C-003 no registro de
+  # evidencia, PENDING). Ate existir, a fila roda o regime FRIO, que e o
+  # que o curva_g documenta, e o rotulo do arquivo de saida diz qual foi.
+  env PREFIX_CACHING=0 bash "$RAIZ/bateria_curva.sh"
 
 passo "2/5 escada do drafter w4a4" \
   bash "$RAIZ/escada_dspark_w4a4.sh" 8192 16384

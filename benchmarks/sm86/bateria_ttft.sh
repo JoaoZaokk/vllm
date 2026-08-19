@@ -31,6 +31,9 @@ OUT="$RAIZ/resultados_ttft.jsonl"
 # deixam a mesma celula duas vezes no arquivo, sem carimbo que as separe,
 # e quem agrega depois nao tem como saber qual e' de quando.
 : > "$OUT"
+
+. "$(dirname "${BASH_SOURCE[0]}")/banner_bateria.sh"
+banner_bateria "ttft" \n    "saida              $OUT" || exit 1
 OUT_MNT="$RAIZ_MNT/resultados_ttft.jsonl"
 LOGS="$RAIZ/logs"
 mkdir -p "$LOGS"

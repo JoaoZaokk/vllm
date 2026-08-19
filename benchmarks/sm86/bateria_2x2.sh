@@ -38,6 +38,9 @@ trap gpu_lock_soltar EXIT
 # nao havia de onde recuperar.
 : > "$OUT"
 
+. "$(dirname "${BASH_SOURCE[0]}")/banner_bateria.sh"
+banner_bateria "2x2" \n    "saida              $OUT" || exit 1
+
 #  nome | entrypoint | modelo | eager
 CELULAS=(
   "A_marlin_graph|awq_entry.sh|/workspace/models/awq-w4a16|0"

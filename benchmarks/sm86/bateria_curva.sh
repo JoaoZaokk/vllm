@@ -25,6 +25,9 @@ trap gpu_lock_soltar EXIT
 # nao havia de onde recuperar.
 : > "$OUT"
 
+. "$(dirname "${BASH_SOURCE[0]}")/banner_bateria.sh"
+banner_bateria "curva" \n    "cache de prefixo   ${CACHE}  ($([ \"$CACHE\" = 1 ] && echo 'quente: repeticao verbatim' || echo 'frio: prefill inteiro'))" \n    "saida              $OUT" || exit 1
+
 CONFIGS=(
   "marlin|awq_entry.sh|/workspace/models/awq-w4a16|"
   "convrot|dspark_entry.sh|/workspace/models/qwen3.8-27b-heretic-convrot-w4a4|convrot_w4a4"
