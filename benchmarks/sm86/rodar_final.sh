@@ -16,11 +16,11 @@ passo() { local n="$1"; shift; echo | tee -a "$LOG"
   "$@" 2>&1 | tee -a "$LOG"
   echo "########## $n rc=${PIPESTATUS[0]} ##########" | tee -a "$LOG"; }
 
+# PART/PARTICAO nao sao lidos por ninguem: o script le
+# VLLM_PP_LAYER_PARTITION, carregado de baseline_congelado.env. O valor
+# coincidia com o padrao, entao a fila parecia funcionar. Para mudar de
+# verdade:  export VLLM_PP_LAYER_PARTITION=20,44
 passo "1/2 equivalencia greedy 16,48" \
-  # PART/PARTICAO nao sao lidos por ninguem: o script le
-  # VLLM_PP_LAYER_PARTITION, carregado de baseline_congelado.env. O valor
-  # coincidia com o padrao, entao a fila parecia funcionar. Para mudar de
-  # verdade:  export VLLM_PP_LAYER_PARTITION=20,44
   bash "$RAIZ/validar_dspark_pp.sh"
 
 passo "2/2 os cinco testes do fork" \
