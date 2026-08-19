@@ -9,6 +9,51 @@
 # produzir EXATAMENTE a mesma saida do decode normal. Se divergir, a verificacao
 # esta aceitando o que nao devia. Se bater, a aceitacao diz se vale a pena.
 set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# ARNES LEGADO -- recusa rodar por padrao.
+#
+# Este script ainda produz IDENTICO em situacoes onde nada foi comparado. Os
+# defeitos estao mapeados e NAO foram corrigidos:
+#
+#   - SAIDA_REF e SAIDA_SPEC nunca sao truncados, e o veredito decide com
+#     `[ -s ]`, que pergunta "nao esta vazio" e nao "e desta execucao". Uma
+#     execucao em que so a rodada B suba compara B contra a referencia de OUTRA
+#     execucao. O disco esteve exatamente nesse estado: referencia de 03:57,
+#     relatorio de 05:14.
+#   - subir() faz `curl /health` na porta 8000 ANTES de checar o container. O
+#     compose publica o servico awq em 8000 com restart:unless-stopped, entao
+#     um servidor de producao responde ao health de um benchmark que nem subiu,
+#     e as duas rodadas medem o mesmo processo -- sem drafter, sem PP=2.
+#   - o erro do `docker run` vai para /dev/null, o `docker logs` e salvo depois
+#     do laco e a remocao forcada do container vem antes: a causa de uma falha
+#     nao sobrevive a ela.
+#   - `FALHOU:` filtra uma lista fechada de regex, entao causa nova imprime
+#     string vazia.
+#   - esperar_vram devolve 0 tambem na condicao de falha, e o chamador nao testa.
+#
+# O caminho conferido e:
+#
+#     ./lab run dspark_pp2 equivalence-greedy
+#
+# Ele resolve a config de uma fonte so, sorteia a porta do host, confirma o
+# container por ID, checa que /v1/models serve o modelo pedido, escreve em
+# runs/<run_id>/ e no veredito le apenas arquivo do proprio run.
+#
+# Para rodar mesmo assim -- comparar comportamentos, reproduzir um defeito:
+#
+#     LAB_ARNES_LEGADO=1 bash validar_dspark_pp.sh
+#
+# Recusa em vez de aviso de proposito: aviso e' rolado para cima e o numero sai
+# igual.
+if [ "${LAB_ARNES_LEGADO:-0}" != "1" ]; then
+  sed -n '/^# ARNES LEGADO/,/^# igual\./p' "${BASH_SOURCE[0]}" >&2
+  echo >&2
+  echo "RECUSADO: arnes legado. Use ./lab run dspark_pp2 equivalence-greedy" >&2
+  echo "          ou LAB_ARNES_LEGADO=1 para rodar assim mesmo." >&2
+  exit 78
+fi
+# ---------------------------------------------------------------------------
 # Lock unico da GPU. Duas sessoes do usuario dividem a mesma placa; cada uma com
 # um monitor esperando "a GPU liberar" dispara no mesmo segundo e estraga as
 # medicoes das duas. Este bloco e' obrigatorio em TODO script que sobe container
