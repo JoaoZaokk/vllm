@@ -10,16 +10,21 @@
 set -uo pipefail
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="$RAIZ/logs/final_$(date +%H%M%S).log"
+mkdir -p "$RAIZ/logs"
 passo() { local n="$1"; shift; echo | tee -a "$LOG"
   echo "########## $n ($(date +%H:%M:%S)) ##########" | tee -a "$LOG"
   "$@" 2>&1 | tee -a "$LOG"
   echo "########## $n rc=${PIPESTATUS[0]} ##########" | tee -a "$LOG"; }
 
 passo "1/2 equivalencia greedy 16,48" \
-  env PART=16,48 bash "$RAIZ/vllm-fork/benchmarks/sm86/validar_dspark_pp.sh"
+  # PART/PARTICAO nao sao lidos por ninguem: o script le
+  # VLLM_PP_LAYER_PARTITION, carregado de baseline_congelado.env. O valor
+  # coincidia com o padrao, entao a fila parecia funcionar. Para mudar de
+  # verdade:  export VLLM_PP_LAYER_PARTITION=20,44
+  bash "$RAIZ/validar_dspark_pp.sh"
 
 passo "2/2 os cinco testes do fork" \
-  bash "$RAIZ/vllm-fork/benchmarks/sm86/run_tests.sh" \
+  bash "$RAIZ/run_tests.sh" \
     v1/worker/test_qwen35_dspark_aux_taps_pp.py \
     v1/worker/test_mamba_hybrid_model_state.py \
     v1/worker/test_eagle3_aux_hidden_states_pp.py \

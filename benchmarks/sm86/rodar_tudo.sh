@@ -31,7 +31,7 @@ passo "2/5 escada do drafter w4a4" \
   bash "$RAIZ/escada_dspark_w4a4.sh" 8192 16384
 
 passo "3/5 equivalencia greedy do DSpark sob PP=2" \
-  bash "$RAIZ/vllm-fork/benchmarks/sm86/validar_dspark_pp.sh"
+  bash "$RAIZ/validar_dspark_pp.sh"
 
 passo "4/5 sweep de GEMM, cinco formas" \
   bash -c 'cd "$1" && . ./gpu_lock.sh && gpu_lock_pegar sweep-cheio 0 || exit 1
@@ -44,7 +44,7 @@ passo "4/5 sweep de GEMM, cinco formas" \
       | grep -vE "WARNING|INFO|sitecustomize|^W0|torch/utils|Triton"' _ "$RAIZ"
 
 passo "5/5 suite de testes do fork" \
-  bash "$RAIZ/vllm-fork/benchmarks/sm86/run_tests.sh"
+  bash "$RAIZ/run_tests.sh"
 
 echo | tee -a "$LOG"
 echo "===== FILA COMPLETA — log em $LOG =====" | tee -a "$LOG"
