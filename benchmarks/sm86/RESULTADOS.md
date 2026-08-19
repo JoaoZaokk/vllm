@@ -1144,34 +1144,91 @@ fisicamente. Prova que naquela faixa a curva e' PLANA, dominada por overhead, e
 que so' o INTERCEPTO tem significado. Ler `b` como throughput seria repetir o
 erro do "87% do pico" que foi riscado mais cedo.
 
-## EM EXECUCAO: equivalencia greedy do DSpark sob PP=2
+## FALHOU: equivalencia greedy do DSpark sob PP=2 -- quarta tentativa
 
-Rodada A (sem draft) sobe e gera 1328 bytes. Rodada B (k=7) falhou tres vezes,
-cada uma por um motivo diferente e nenhum do modelo:
+Quatro tentativas, quatro falhas, ZERO medicoes do modelo. A equivalencia
+continua sem resposta: nao ha IDENTICO nem DIVERGIU, so' rodada B que nao sobe.
+
+    == A: PP=2 sem draft (referencia) ==
+      subiu, 1328 bytes de saida
+    == B: PP=2 + DSpark k=7 ==
+      FALHOU: No available memory
+    == veredito ==
+      incompleto: um dos dois nao subiu
+
+As tres primeiras falhas foram de arnes, cada uma por um motivo diferente:
 
   1. `-0,41 GiB` de KV com particao 28,36
   2. `python3` do HOST aponta para um `C:\Python314\python.exe` quebrado -- so'
      `python` funciona. As duas funcoes que parseiam a resposta usavam python3,
      entao a saida vinha vazia e o veredito dizia "incompleto"
   3. `LEN=32768` fixo no script: com draft pede 3,93 GiB de KV contra 2,99
-     disponiveis. A sem draft cabe em 32k, a B nao
+     disponiveis
 
-Rodando agora com `PART=16,48 LEN=8192`, que e' o teto que a escada provou.
+### A quarta falha nao e de arnes: o drafter nao cabe no estagio 1
 
-O que o resultado significa: as duas rodadas usam o MESMO entrypoint, mesma
-particao, mesmo tudo -- so' muda k=0 contra k=7. Antes A usava `awq_entry` e B
-usava `dspark_entry`, com defaults diferentes de dtype de cache mamba, e a
-comparacao tinha mais de uma variavel. Se der IDENTICO agora, prova que a
-verificacao especulativa esta correta sob PP -- que e' o unico sintoma
-observavel de tap faltando, duplicado ou fora de ordem.
+Rodada com `PART=16,48 LEN=8192`, o teto que a escada provou. Os numeros dizem
+onde e' o aperto, e NAO e' onde a mensagem de erro sugere:
+
+| | rodada A (k=0) | rodada B (k=7) |
+|---|---|---|
+| PP0 (3080 Ti) pesos | 6,39 GiB | 6,39 GiB |
+| PP0 KV disponivel | 2,13 GiB | **2,19 GiB** |
+| PP1 (3090) | 15,17 GiB consumido (pesos + non-torch) | **17,57 GiB so' de pesos** |
+| PP1 KV disponivel | 4,03 GiB em uso, folga de 3,83 a 5,31 | nunca chegou a imprimir |
+
+**O estagio 0 nao e' o gargalo.** A rodada B teve MAIS KV nele (2,19) do que a
+rodada A que funcionou (2,13). Toda a diferenca esta na 3090.
+
+O drafter custa **pelo menos 2,4 GiB** no estagio 1 -- limite inferior, porque a
+comparacao e' peso-sozinho da B (17,57) contra peso-mais-non-torch da A (15,17),
+e o segundo e' o maior dos dois. Com teto de 0,88 x 24 = 21,12 GiB e ~1,9 GiB de
+pico de ativacao, sobra por volta de 1 GiB para KV, contra os 4,03 GiB que a
+rodada A gastou na mesma placa.
+
+E o pouco que sobra ainda leva um desconto de layout:
+
+    WARNING kv_cache_utils.py:1261] Add 2 padding layers, may waste at most 4.17%
+    WARNING kv_cache_utils.py:1261] Add 4 padding layers, may waste at most 25.00%
+
+O drafter acrescenta um grupo de KV proprio sobre os dois que o hibrido ja tem
+(atencao cheia + GDN), e a paginacao uniforme paga padding entre grupos. Morreu
+em `_check_enough_kv_cache_memory`, `kv_cache_utils.py:758`.
+
+### O conselho do vLLM esta errado aqui
+
+    ValueError: No available memory for the cache blocks. Try increasing
+    `gpu_memory_utilization`
+
+Nao ha o que aumentar: ja esta em 0,88, e no boot a 3090 tem 22,6 de 24 GiB
+livres. Nao falta memoria na maquina, falta memoria NAQUELE estagio. O que
+resolve e' redistribuir camadas, nao afrouxar o teto.
+
+### O alvo do proximo teste, com numero
+
+`PART=16,48` foi escolhida quando `LEN` era 32768 -- so' 16 camadas no estagio 0
+porque o KV de 32k nao cabia na placa de 12 GB. Com `LEN=8192` a necessidade de
+KV do estagio 0 caiu 4x, e ele sobrou com 2,19 GiB. Entao da' para empurrar
+camadas de volta para a 3080 Ti e aliviar a 3090, que e' quem carrega o drafter.
+
+Degraus a testar, nesta ordem: **`20,44`** e **`24,40`**. Nao rodados -- a placa
+saiu da minha mao antes.
+
+Enquanto isso nao roda, o encaminhamento de aux taps entre estagios continua
+**sem criterio de aceite**. Nada aqui indica que ele esteja errado; indica que
+ele nunca foi testado.
 
 # O QUE FALTA
 
 ## Com GPU
 
-  1. **Terminar a equivalencia greedy** (rodando). Se der DIVERGIU, o
-     encaminhamento de aux taps entre estagios esta aceitando token que o alvo
-     nao produziria, e o alvo do conserto e' `qwen3_next.py`.
+  1. **Fazer a rodada B da equivalencia greedy SUBIR.** Quatro tentativas, zero
+     medicoes. Proximo passo com numero: `PART=20,44` e depois `24,40`, com
+     `LEN=8192`, porque o aperto esta comprovadamente na 3090 (que carrega o
+     drafter, >=2,4 GiB) e o estagio 0 sobrou com 2,19 GiB. So' depois disso a
+     pergunta original -- IDENTICO ou DIVERGIU -- pode ser feita. Se der
+     DIVERGIU, o encaminhamento de aux taps esta aceitando token que o alvo nao
+     produziria, e o alvo do conserto e' `qwen3_next.py`.
   2. **Teto de contexto do DSpark entre 8k e 16k.** Escada com degraus de
      10240 / 12288 / 14336. A estimativa de 6.272 do vLLM contradiz o boot de
      8192 que funcionou, entao a estimativa esta errada e so' escada resolve.
@@ -1188,7 +1245,7 @@ observavel de tap faltando, duplicado ou fora de ordem.
   5. Commitar e empurrar este registro.
   6. `.env` e `docker-compose.yml` continuam fora do git.
 
-# CINCO BUGS DE ARNES, CADA UM CUSTOU UMA RODADA
+# SEIS BUGS DE ARNES, CADA UM CUSTOU UMA RODADA
 
 Nenhum apareceu em `bash -n`. Vale como lista de verificacao:
 
@@ -1207,6 +1264,12 @@ Nenhum apareceu em `bash -n`. Vale como lista de verificacao:
   5. **Coleta ampla demais no pytest** -- mandar `.` colhe a arvore inteira do
      vLLM: 152 erros de coleta em 9 minutos, de testes que pedem Blackwell,
      ROCm ou CPU-only.
+
+  6. **`grep` num caminho relativo dentro de wrapper de background** -- o
+     comando que lia o resultado usava `logs/validar_stdout2.txt`, mas o cwd do
+     wrapper nao e' a raiz da stack. Saiu com codigo 2 e o evento chegou como
+     "failed", quando na verdade o script tinha terminado normalmente e escrito
+     o veredito. Caminho absoluto em wrapper, sempre.
 
 E um furo de processo: rodei `equivalencia_dtype.sh` sem pegar o lock porque
 aquele script era anterior ao lock. A auditoria seguinte achou DEZ scripts sem
