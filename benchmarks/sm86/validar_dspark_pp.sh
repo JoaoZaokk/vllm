@@ -67,13 +67,42 @@ SAIDA_REF="$STACK/saida_sem_draft.json"
 SAIDA_SPEC="$STACK/saida_dspark.json"
 : > "$OUT"
 
+# VRAM base: medida com a placa ociosa, ANTES do primeiro boot. Sem isto a
+# rodada B arranca enquanto o container de A ainda esta devolvendo memoria,
+# e o estagio 1 perfila com menos VRAM do que realmente tem -- foi o que fez
+# B morrer com "No available memory" num boot que sozinho sobe.
+VRAM_BASE=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | paste -sd, -)
+echo "VRAM base (ociosa): ${VRAM_BASE} MiB" | tee -a $OUT
+
+esperar_vram() {
+  local i usados folga=700
+  for i in $(seq 1 60); do
+    usados=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | paste -sd, -)
+    local ok=1 n=1
+    while IFS= read -r u; do
+      local b=$(echo "$VRAM_BASE" | cut -d, -f$n)
+      [ "$u" -gt $((b + folga)) ] && ok=0
+      n=$((n+1))
+    done < <(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits)
+    if [ "$ok" = 1 ]; then
+      echo "  VRAM devolvida apos ${i}s: ${usados} MiB (base ${VRAM_BASE})" | tee -a $OUT
+      return 0
+    fi
+    sleep 1
+  done
+  echo "  AVISO: VRAM nao voltou ao baseline em 60s: ${usados} MiB (base ${VRAM_BASE})" | tee -a $OUT
+  return 0
+}
+
 subir() {  # $1=nome  $2=entry  $3=spec_k
   docker logs val > "$STACK/logs/validar_${rodada:-x}.log" 2>&1 || true
 docker rm -f val >/dev/null 2>&1
+  esperar_vram
   MSYS_NO_PATHCONV=1 docker run -d --name val --gpus all -p 8000:8000 --entrypoint bash --shm-size=8g \
     -v vllm-cache:/root/.cache/vllm -v triton-cache:/root/.triton \
     -v "${STACK_MNT}/models:/workspace/models:ro" \
     -v "${STACK_MNT}/docker:/opt/qwen38/docker:ro" \
+    -v "${STACK_MNT}/plugin/qwen_w4a4_vllm:/usr/local/lib/python3.12/dist-packages/qwen_w4a4_vllm:ro" \
     -e PIPELINE_PARALLEL_SIZE=2 -e VLLM_PP_LAYER_PARTITION="$PART" \
     -e MODEL_PATH=/workspace/models/awq-w4a16 -e QUANTIZATION= \
     -e CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
@@ -81,10 +110,11 @@ docker rm -f val >/dev/null 2>&1
     -e NUM_SPECULATIVE_TOKENS="$3" -e MAX_MODEL_LEN="$LEN" -e MAX_NUM_SEQS=2 \
     -e GPU_MEMORY_UTILIZATION="$UTIL" -e KV_CACHE_MEMORY_BYTES= \
     -e LIMIT_MM_PER_PROMPT="$LIMIT_MM" \
+    -e VLLM_DISABLE_COMPILE_CACHE=1 \
     "$IMG" "/opt/qwen38/docker/$2" >/dev/null 2>&1
   for i in $(seq 1 75); do
     curl -s -f http://127.0.0.1:8000/health >/dev/null 2>&1 && return 0
-    docker ps -q -f name=val | grep -q . || return 1
+    docker ps -q -f "name=^val$" | grep -q . || return 1
     sleep 8
   done
   return 1
