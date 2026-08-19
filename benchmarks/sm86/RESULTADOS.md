@@ -1241,6 +1241,98 @@ Enquanto isso nao roda, o encaminhamento de aux taps entre estagios continua
 **sem criterio de aceite**. Nada aqui indica que ele esteja errado; indica que
 ele nunca foi testado.
 
+# O QUE O CHECKPOINT DO DRAFTER DIZ — 19/ago/2026
+
+Lido de `models/dspark-qwen38-w4a4/config.json` e do codigo do fork. Nenhuma
+GPU envolvida, e responde tres perguntas que estavam sendo tratadas como abertas.
+
+## O drafter e' ConvRot. O ConvRot nao perdeu, mudou de funcao
+
+    "quant_method": "convrot_w4a4", "convrot_groupsize": 256,
+    "quant_group_size": 64, "exclude_modules": ["self_attn.qkv_proj"]
+
+O alvo de producao e' AWQ/Marlin, e o drafter que roda junto dele e' ConvRot W4A4.
+A curva com cache ligado tirou o ConvRot do papel de ALVO; ele continua no stack
+como quantizacao do DRAFTER, onde o que importa e' peso pequeno (1,3 G contra 2,6
+do bf16) e nao o regime de M do verificador.
+
+## `block_size: 7` e' do checkpoint, nao um guard do vLLM
+
+O drafter declara `"block_size": 7`. O `k=7` que usamos nao vem de uma regra
+"k < block_size corrompe" imposta pelo vLLM -- nao ha assert desse tipo em
+`vllm/v1/worker/gpu/spec_decode/dspark/`. Vem do bloco que este checkpoint foi
+treinado para emitir. Usar 7 esta certo; tratar a explicacao como propriedade
+matematica do algoritmo DSpark nao.
+
+## Adaptive k: a confidence head EXISTE no checkpoint e e' DESCARTADA no load
+
+    "enable_confidence_head": true, "confidence_head_with_markov": true,
+    "markov_head_type": "vanilla", "markov_rank": 256,
+    "confidence_head_alpha": 1.0
+
+E em `vllm/model_executor/models/qwen3_dspark.py:183`, no nosso proprio fork:
+
+    # confidence_head is not wired into inference yet; skip its weights.
+    skip_substrs = ["mask_embedding", "confidence_head"]
+
+Os pesos sao pulados no carregamento. Adaptive k nao e' uma flag para ligar, e'
+codigo para escrever.
+
+### E o nosso proprio sweep prediz que nao paga
+
+O motivo vai alem de "falta fiacao". O `speculator.py` mostra a forma do custo:
+o rascunho e' UMA passagem paralela do backbone com N tokens de consulta, seguida
+de um laco sequencial `for i in range(n_spec)` de cabeca Markov barata.
+
+Entao truncar por confianca so' pode economizar em tres lugares, e os tres estao
+fechados:
+
+  1. **Passagem do backbone do drafter** -- ja aconteceu quando a confianca
+     existe. Decidir depois nao encolhe o que ja rodou.
+  2. **Verificacao no alvo** -- verificar 4 tokens em vez de 7 e' M=5 contra M=8,
+     dentro da faixa que o sweep de GEMM mediu como PLANA. Tres caminhos fitaram
+     inclinacao negativa ali justamente porque so' o pedagio fixo conta. Marlin
+     cobra 22-71 us de intercepto; a largura da proposta some no ruido.
+  3. **Cauda do laco Markov** -- unico ganho real, e e' a parte barata.
+
+Ou seja: a mesma medicao que matou o despacho por M tambem limita o teto do
+adaptive k nesta maquina. Isso bate com o relato upstream de que cortar proposta
+por confianca nao melhorou wall clock em nenhum limiar testado. Chegamos por
+caminhos diferentes ao mesmo lugar.
+
+Nao esta descartado -- 27B bandwidth-bound nao e' L20X. Esta REBAIXADO, com
+motivo medido em vez de intuicao.
+
+## O que muda na Fase 0: reparticao NAO e' um botao neutro de memoria
+
+    "target_layer_ids": [4, 16, 28, 40, 52]     "num_target_layers": 64
+
+O drafter consome cinco taps do alvo. Com `PART=16,48` o estagio 0 tem as camadas
+0-15, entao:
+
+    16,48   tap 4 no estagio 0            1 de 5 atravessa a fronteira: 4
+    20,44   taps 4 e 16 no estagio 0      2 de 5
+    24,40   taps 4 e 16 no estagio 0      2 de 5
+
+Mudar a particao MUDA QUAIS TAPS CRUZAM O LIMITE ENTRE ESTAGIOS -- que e'
+exatamente o mecanismo sob teste na equivalencia greedy. Repartir para caber na
+memoria e medir equivalencia na mesma rodada mistura a variavel independente com
+o instrumento.
+
+Mais uma razao para congelar `16,48` como baseline: e' a particao onde a config
+ja' subiu E onde a distribuicao de taps ja' e' conhecida. Se a memoria voltar a
+apertar depois das duas correcoes de config, reparticionar continua valido, mas
+vira um segundo experimento, nao um ajuste.
+
+## Uma emenda de linguagem que vale registrar
+
+"TurboQuant e' feito para Ampere" e' forte demais. O correto: **ha caminho
+explicito para Ampere no backend** (`cap < (8,9)` em
+`triton_turboquant_decode.py:25`). Isso prova suporte intencional a' arquitetura.
+Nao prova que as variantes funcionam bem neste hibrido, sob PP, com DSpark, em
+v0.27.1. So' A/B prova.
+
+
 # O QUE FALTA
 
 ## Com GPU
@@ -1274,7 +1366,10 @@ ele nunca foi testado.
      estado GDN das outras 48 usa `MambaDType` (`cache.py:37`), que aceita
      apenas `auto/float32/float16/bfloat16`. Nenhuma opcao quantizada, e ja'
      estamos em bf16. Nao desce mais por ali.
-  5. **W4A8 real dentro do vLLM.** Roda em bench de kernel (as duas falhas eram
+  5. **ConvRot + DSpark como A/B do verificador, em GPU UNICA.** Serve para
+     provar ou derrubar a tese de que o verificador vive no M pequeno onde o
+     Marlin domina. Sob PP nao da: `dspark_entry.sh:24`.
+  6. **W4A8 real dentro do vLLM.** Roda em bench de kernel (as duas falhas eram
      de chamada, minhas). Quebra na captura de CUDA graph no model runner. Tem o
      menor custo marginal da tabela. Vale tentar depois de 1-3.
 
