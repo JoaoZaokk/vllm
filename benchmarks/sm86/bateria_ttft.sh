@@ -9,6 +9,42 @@
 #
 # Nada aqui requantiza. Os dois checkpoints ja existem no disco.
 set -uo pipefail
+
+# --------------------------------------------------------------------------
+# ARNES APOSENTADO -- recusa rodar por padrao.
+#
+# Substituido por:
+#
+#     ./lab run <perfil> ttft
+#
+# A tarefa separa a PRIMEIRA requisicao das demais: so ela e fria. Mediana
+# das tres, que era o que saia daqui, mistura dois regimes na mesma celula.
+#
+# E confere no /metrics se o servidor fez o que a config diz -- config
+# dizendo uma coisa e servidor fazendo outra ja aconteceu neste projeto.
+#
+# Os defeitos que ficaram para tras, e que a tarefa nao tem:
+#
+#   - lista de -e escrita a mao, que diverge sem aparecer em lugar nenhum;
+#   - porta fixa, em vez de sorteada pelo Docker;
+#   - identidade do servidor por porta, sem conferir o container por ID nem
+#     perguntar ao /v1/models qual modelo esta sendo servido;
+#   - resultado em arquivo compartilhado na raiz, em vez de runs/<run_id>/;
+#   - nenhuma procedencia: sem commit, sem digest de imagem, sem seed.
+#
+# Para rodar assim mesmo -- comparar comportamentos, reproduzir um defeito:
+#
+#     LAB_ARNES_LEGADO=1 bash bateria_ttft.sh
+#
+# Recusa em vez de aviso: aviso e' rolado para cima e o numero sai igual.
+if [ "${LAB_ARNES_LEGADO:-0}" != "1" ]; then
+  sed -n '/^# ARNES APOSENTADO/,/^# igual\.$/p' "${BASH_SOURCE[0]}" >&2
+  echo >&2
+  echo "RECUSADO: arnes aposentado. Use:  ./lab run <perfil> ttft" >&2
+  echo "          ou LAB_ARNES_LEGADO=1 para rodar assim mesmo." >&2
+  exit 78
+fi
+# --------------------------------------------------------------------------
 # Lock unico da GPU. Duas sessoes do usuario dividem a mesma placa; cada uma com
 # um monitor esperando "a GPU liberar" dispara no mesmo segundo e estraga as
 # medicoes das duas. Este bloco e' obrigatorio em TODO script que sobe container

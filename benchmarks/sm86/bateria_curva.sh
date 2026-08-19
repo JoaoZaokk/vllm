@@ -6,6 +6,44 @@
 # escolha que importa agora, porque manter as duas representacoes de peso na
 # VRAM esta descartado -- 17,41 + 17,78 = 35,19 GiB contra 24 da placa.
 set -uo pipefail
+
+# --------------------------------------------------------------------------
+# ARNES APOSENTADO -- recusa rodar por padrao.
+#
+# Substituido por:
+#
+#     ./lab run marlin_single curva-g   (e depois convrot_single)
+#
+# A matriz saiu do script: a tarefa roda UM perfil, e comparar caminhos de
+# GEMM e rodar duas vezes. Os dois perfis diferem so no caminho de GEMM, e
+# ha teste que exige isso.
+#
+# Alem disso a tarefa marca G<16 como nao confiavel em vez de publicar, e
+# confere que o servidor gerou o G exato que min_tokens pediu -- sem isso o
+# ponto vai parar em outro lugar do eixo sem avisar.
+#
+# Os defeitos que ficaram para tras, e que a tarefa nao tem:
+#
+#   - lista de -e escrita a mao, que diverge sem aparecer em lugar nenhum;
+#   - porta fixa, em vez de sorteada pelo Docker;
+#   - identidade do servidor por porta, sem conferir o container por ID nem
+#     perguntar ao /v1/models qual modelo esta sendo servido;
+#   - resultado em arquivo compartilhado na raiz, em vez de runs/<run_id>/;
+#   - nenhuma procedencia: sem commit, sem digest de imagem, sem seed.
+#
+# Para rodar assim mesmo -- comparar comportamentos, reproduzir um defeito:
+#
+#     LAB_ARNES_LEGADO=1 bash bateria_curva.sh
+#
+# Recusa em vez de aviso: aviso e' rolado para cima e o numero sai igual.
+if [ "${LAB_ARNES_LEGADO:-0}" != "1" ]; then
+  sed -n '/^# ARNES APOSENTADO/,/^# igual\.$/p' "${BASH_SOURCE[0]}" >&2
+  echo >&2
+  echo "RECUSADO: arnes aposentado. Use:  ./lab run marlin_single curva-g   (e depois convrot_single)" >&2
+  echo "          ou LAB_ARNES_LEGADO=1 para rodar assim mesmo." >&2
+  exit 78
+fi
+# --------------------------------------------------------------------------
 export MSYS_NO_PATHCONV=1
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

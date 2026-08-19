@@ -19,6 +19,48 @@
 # Cache de prefixo DESLIGADO nas quatro: com ele ligado a segunda chamada nao
 # paga prefill e o TTFT deixa de medir o caminho de GEMM.
 set -uo pipefail
+
+# --------------------------------------------------------------------------
+# ARNES APOSENTADO -- recusa rodar por padrao.
+#
+# Substituido por:
+#
+#     ./lab run <perfil> curva-g --set enforce_eager=true
+#
+# Esta bateria DEIXOU DE EXISTIR como conceito. Graph ligado contra
+# enforce-eager e uma variavel de configuracao, entao a matriz 2x2 inteira
+# sao quatro execucoes da MESMA tarefa, com quatro config_hash distintos:
+#
+#     ./lab run marlin_single  curva-g
+#     ./lab run marlin_single  curva-g --set enforce_eager=true
+#     ./lab run convrot_single curva-g
+#     ./lab run convrot_single curva-g --set enforce_eager=true
+#
+# Cada run e identificavel pelo hash, em vez de por lembrar como o script
+# foi chamado.
+#
+# Os defeitos que ficaram para tras, e que a tarefa nao tem:
+#
+#   - lista de -e escrita a mao, que diverge sem aparecer em lugar nenhum;
+#   - porta fixa, em vez de sorteada pelo Docker;
+#   - identidade do servidor por porta, sem conferir o container por ID nem
+#     perguntar ao /v1/models qual modelo esta sendo servido;
+#   - resultado em arquivo compartilhado na raiz, em vez de runs/<run_id>/;
+#   - nenhuma procedencia: sem commit, sem digest de imagem, sem seed.
+#
+# Para rodar assim mesmo -- comparar comportamentos, reproduzir um defeito:
+#
+#     LAB_ARNES_LEGADO=1 bash bateria_2x2.sh
+#
+# Recusa em vez de aviso: aviso e' rolado para cima e o numero sai igual.
+if [ "${LAB_ARNES_LEGADO:-0}" != "1" ]; then
+  sed -n '/^# ARNES APOSENTADO/,/^# igual\.$/p' "${BASH_SOURCE[0]}" >&2
+  echo >&2
+  echo "RECUSADO: arnes aposentado. Use:  ./lab run <perfil> curva-g --set enforce_eager=true" >&2
+  echo "          ou LAB_ARNES_LEGADO=1 para rodar assim mesmo." >&2
+  exit 78
+fi
+# --------------------------------------------------------------------------
 export MSYS_NO_PATHCONV=1
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
