@@ -52,6 +52,11 @@ STACK="${W4A4_ROOT:-$(cd "$RAIZ_REPO/.." && pwd)}"
 # O -v do Docker Desktop no Windows quer C:/..., nao /c/...
 STACK_MNT="$(cd "$STACK" && (pwd -W 2>/dev/null || pwd))"
 
+# Carimbo no nome: sem ele a rodada seguinte sobrescreve o log de container da
+# anterior. Aconteceu -- uma auditoria leu validar_B.log com 51 bytes ("No such
+# container") e concluiu que a falha nunca fora registrada, quando o traceback
+# existira e fora lido horas antes. Evidencia que some nao e evidencia.
+CARIMBO="$(date +%m%d_%H%M%S)"
 OUT="$STACK/validacao_dspark.txt"
 SAIDA_REF="$STACK/saida_sem_draft.json"
 SAIDA_SPEC="$STACK/saida_dspark.json"
@@ -62,7 +67,11 @@ SAIDA_SPEC="$STACK/saida_dspark.json"
 # e o estagio 1 perfila com menos VRAM do que realmente tem -- foi o que fez
 # B morrer com "No available memory" num boot que sozinho sobe.
 VRAM_BASE=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | paste -sd, -)
-echo "VRAM base (ociosa): ${VRAM_BASE} MiB" | tee -a $OUT
+VRAM_ROTULO=$(nvidia-smi --query-gpu=index,name,memory.used --format=csv,noheader | paste -sd" | " -)
+echo "VRAM base por placa: ${VRAM_ROTULO}" | tee -a $OUT
+# Rotulada por indice e modelo: "4169,2608" sem rotulo ja foi lido como
+# soma das duas placas, o que muda o diagnostico inteiro.
+echo "VRAM base (soma nao, por placa na ordem do nvidia-smi): ${VRAM_BASE} MiB" | tee -a $OUT
 
 esperar_vram() {
   local i usados folga=700
@@ -85,7 +94,7 @@ esperar_vram() {
 }
 
 subir() {  # $1=nome  $2=entry  $3=spec_k
-  docker logs val > "$STACK/logs/validar_${rodada:-x}.log" 2>&1 || true
+  docker logs val > "$STACK/logs/validar_${rodada:-x}_${CARIMBO}.log" 2>&1 || true
 docker rm -f val >/dev/null 2>&1
   esperar_vram
   # A lista de -e e de -v vive em baseline_congelado.env. Repetir aqui foi
@@ -135,7 +144,7 @@ if subir A dspark_entry.sh 0; then
 else
   echo "  FALHOU: $(docker logs val 2>&1 | grep -oE 'No available memory|estimated maximum model length is [0-9]+|NotImplementedError[^\"]*' | tail -1)" | tee -a $OUT
 fi
-docker logs val > "$STACK/logs/validar_${rodada:-x}.log" 2>&1 || true
+docker logs val > "$STACK/logs/validar_${rodada:-x}_${CARIMBO}.log" 2>&1 || true
 docker rm -f val >/dev/null 2>&1
 
 echo "== B: PP=2 + DSpark k=$NUM_SPECULATIVE_TOKENS ==" | tee -a $OUT
@@ -146,7 +155,7 @@ if subir B dspark_entry.sh "$NUM_SPECULATIVE_TOKENS"; then
 else
   echo "  FALHOU: $(docker logs val 2>&1 | grep -oE 'No available memory|SupportsPP|NotImplementedError[^\"]*|Unsupported context manager' | tail -1)" | tee -a $OUT
 fi
-docker logs val > "$STACK/logs/validar_${rodada:-x}.log" 2>&1 || true
+docker logs val > "$STACK/logs/validar_${rodada:-x}_${CARIMBO}.log" 2>&1 || true
 docker rm -f val >/dev/null 2>&1
 
 echo "== veredito ==" | tee -a $OUT
