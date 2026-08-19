@@ -24,12 +24,38 @@ gpu_lock_pegar() {
       return 0
     fi
 
-    # Lock existente: o dono ainda respira? `kill -0` nao mata, so' testa.
-    # Sem isto, um vazamento (por exemplo um script que termina em `exec`, o que
-    # impede o trap EXIT de rodar) bloqueia a placa ate o teto de idade -- foi
-    # exatamente o que aconteceu e travou uma fila inteira de recuperacao.
+    # Lock existente. Como testar se o dono vive depende de QUEM escreveu:
+    #
+    #   - Controlador Python (control/runtime.py): escreve hb=<epoch>, atualizado
+    #     a cada 15s. O pid dele e' NATIVO do Windows; `kill -0` do MSYS reporta
+    #     MORTO um processo vivo (namespaces de pid diferentes). Foi medido: pid
+    #     vivo no tasklist, kill -0 diz morto. Entao aqui NAO se usa kill -0 --
+    #     usa-se o batimento, exatamente como o _dono_morreu do runtime.py.
+    #   - Script bash da geracao antiga: escreve so' pid=, sem hb=. Mesmo namespace
+    #     de pid, kill -0 e' confiavel. So' nesse caso se usa kill -0.
+    #
+    # Sem esta distincao, o bash reivindicava o lock do controlador (kill -0 falso
+    # negativo), apagava e subia na placa junto -- exclusao mutua quebrada pelo
+    # proprio conserto anterior, que criou o hb= e nunca ensinou o bash a le-lo.
+    local GPU_LOCK_MORTO_S="${GPU_LOCK_MORTO_S:-55}"   # = BATIMENTO_S*3+10 no runtime.py
+    local dono_hb=$(sed -n 's/^hb=//p'  "$GPU_LOCK_ARQ" 2>/dev/null)
     local dono_pid=$(sed -n 's/^pid=//p' "$GPU_LOCK_ARQ" 2>/dev/null)
-    if [ -n "$dono_pid" ] && ! kill -0 "$dono_pid" 2>/dev/null; then
+
+    if [ -n "$dono_hb" ]; then
+      # Dono com batimento (controlador): vivo se o batimento for recente.
+      if [[ "${dono_hb%.*}" =~ ^[0-9]+$ ]]; then
+        local idade_hb=$(( $(date +%s) - ${dono_hb%.*} ))
+        if [ "$idade_hb" -gt "$GPU_LOCK_MORTO_S" ]; then
+          echo "[lock] batimento parado ha ${idade_hb}s (> ${GPU_LOCK_MORTO_S}s). Vazado, retomando."
+          rm -f "$GPU_LOCK_ARQ"
+          continue
+        fi
+        # batimento fresco: dono vivo. NAO reivindica; cai para espera/timeout abaixo.
+      else
+        echo "[lock] batimento ilegivel (hb=$dono_hb). Conservador: nao reivindico."
+      fi
+    elif [ -n "$dono_pid" ] && ! kill -0 "$dono_pid" 2>/dev/null; then
+      # Dono sem batimento (bash antigo), mesmo namespace: kill -0 confiavel.
       echo "[lock] dono pid=$dono_pid nao existe mais. Lock vazado, retomando."
       rm -f "$GPU_LOCK_ARQ"
       continue
