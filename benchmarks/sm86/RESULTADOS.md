@@ -826,3 +826,152 @@ Leitura final das quatro linhas:
 
 O backup das configuracoes de antes da bateria esta em
 `backup-config/20260818-203718/`.
+
+# VARREDURA DE M E O 2x2 DE CUDA GRAPH — 18/ago/2026, madrugada
+
+Duas medicoes que juntas fecham a pergunta "por que o int4 nativo perde no
+decode", e derrubam DUAS explicacoes pelo caminho -- uma minha, uma de fora.
+
+## Antes: uma extrapolacao minha que nao entra em lugar nenhum
+
+Eu disse em conversa que o TTFT de 530 ms contra 1854 ms era "3,5x, ou 87% da
+razao de pico de tensor core (4x), logo o kernel e excelente". Isso e' invalido:
+TTFT end-to-end carrega atencao, GDN, launch, epilogo, cache e prompts de
+tamanhos diferentes (2301 contra 2382 tokens). Nao se tira eficiencia de kernel
+de uma razao dessas. Nao foi gravado no registro e nao deve ser citado.
+
+## Varredura de M, formas reais do Qwen, seis caminhos
+
+`sweep_gemm_m.py`, GEMM isolado, sem servidor. Tempo total por chamada em us,
+`q_proj` (5120 -> 6144):
+
+| M | bf16 | gemv_awq | marlin | convrot_a4 | convrot_a8 | w4a8_real |
+|---|---|---|---|---|---|---|
+| 1 | 115,7 | 387,0 | **30,5** | 138,2 | 129,5 | 209,4 |
+| 8 | 131,0 | 1267,6 | **31,7** | 146,8 | 245,2 | 212,0 |
+| 64 | 128,0 | 1023,9 | **109,4** | 157,2 | 228,8 | 218,0 |
+| 128 | 169,5 | 1627,9 | 156,7 | **99,7** | 237,6 | 224,1 |
+| 256 | 287,7 | 3193,3 | 266,2 | **126,0** | 287,7 | 244,2 |
+| 1024 | 1089,9 | — | 898,5 | **271,2** | 542,1 | 528,9 |
+| 5856 | 5130,8 | — | 5198,3 | **1314,2** | 2277,9 | 2203,1 |
+
+`down_proj` (17408 -> 5120) tem a mesma forma de curva, com o cruzamento no mesmo
+lugar.
+
+### O ajuste que separa pedagio de trabalho
+
+`tempo = a + b*M` na faixa M<=64. `a` e' o custo FIXO por chamada, `b` o custo
+por linha:
+
+| caminho | fixo/chamada | por linha |
+|---|---|---|
+| marlin | **30,8 us** | 1,189 us |
+| bf16 | 117,6 | 0,206 |
+| convrot_a4 | 143,5 | **0,388** |
+| convrot_a8 | 187,4 | 1,223 |
+| w4a8_real | 211,4 | **0,062** |
+| gemv_awq | 663,1 | 5,566 |
+
+Assinatura clara: **Marlin tem o menor pedagio e o maior custo marginal;
+ConvRot e W4A8 tem o oposto.** Dai o cruzamento.
+
+RESSALVA que precisa andar junto: `b` e' coeficiente de ajuste empirico, nao
+throughput intrinseco de tensor core. A curva troca de regime -- o proprio
+`convrot_a8` e' NAO MONOTONICO (M=1 da 129 us, M=16 da 351, M=32 volta a 225),
+o que so' acontece se o kernel muda de estrategia por tamanho. Ler `b` como
+"19x melhor que o Marlin" seria repetir o erro do "87% do pico".
+
+### Cruzamento contra o baseline REAL
+
+    M = 1      marlin 4,5x mais rapido que convrot_a4
+    M ~ 100    vira
+    M = 5856   convrot_a4 4,0x mais rapido
+
+E' MAIS CEDO que o cruzamento contra bf16 medido em outra sessao (M=256), nao
+mais tarde -- porque o Marlin degrada rapido com M enquanto o bf16 fica plano.
+Quem compara contra bf16 esta comparando com um baseline fraco nos dois extremos.
+
+### Dois caminhos que ninguem tinha rodado
+
+**`gemv_awq_w4a16` e' o pior da tabela.** Eu tinha apontado como possivel
+alavanca de decode por ser GEMV dedicado a M pequeno. Nao e': 663 us de pedagio,
+21x o Marlin. Medido, nao suposto.
+
+**`w4a8_int8_linear`, o tier "que nunca rodou", RODA.** As duas falhas iniciais
+eram de chamada, minhas:
+  - `quantize_w4a8_int8_weight` devolve `(qdata, s_rel, s_channel, correction,
+    codebook)` mas o `linear` recebe `codebook` ANTES de `correction`. Posicional
+    inverte os dois e o backend recusa com "correction: shape [16] fails:
+    exactly 2D" -- estava recebendo o codebook de 16 entradas no lugar da correcao.
+  - `gemv_awq_w4a16` quer `qweight` int8 com `k//2` colunas, nao int32.
+
+## O 2x2: CUDA graph nao e o culpado
+
+A hipotese que sobrou da varredura era: o pedagio do ConvRot e' ausencia de
+captura de CUDA graph. Teste de quatro celulas, cache de prefixo DESLIGADO nas
+quatro, semente de prompt FIXA (2058 tokens identicos em todas):
+
+| celula | TTFT frio | decode |
+|---|---|---|
+| A marlin + graph | 1590 ms | 45,89 tok/s |
+| B marlin + eager | 1725 ms | 15,00 |
+| C convrot + graph | **502 ms** | 29,71 |
+| D convrot + eager | 719 ms | 8,98 |
+
+    Marlin   graph/eager = 3,06x
+    ConvRot  graph/eager = 3,31x
+
+**Os dois sao capturados.** O ConvRot aproveita a captura ate um pouco MAIS que o
+Marlin. A hipotese esta morta.
+
+Flags conferidas no log das quatro, nao assumidas:
+`enable_prefix_caching=False` nos dois modelos, `enforce_eager` batendo com a
+celula em todas.
+
+### O que isso implica
+
+Sob CUDA graph o overhead de host some para os dois. E o ConvRot CONTINUA 1,54x
+mais lento no decode (29,71 contra 45,89). Logo a diferenca que sobra nao e'
+despacho -- e' o kernel em M=1.
+
+Isso tambem corrige a leitura de fora que dizia "o CUDA do W4A4 (36,3 us) ganha
+do BF16 (42,3 us), logo o kernel e melhor". Contra bf16, ganha. Mas o caminho
+INTEIRO do Marlin -- host mais GPU -- cabe em 30,8 us, entao o GPU dele em M=1 e'
+menor que os 36,3 do ConvRot. A razao que sobra (~1,4x) bate com o 1,54x
+observado no servico.
+
+Conclusao que as duas sessoes agora sustentam: **em M=1 o kernel do Marlin e
+genuinamente melhor.** Nao ha vantagem escondida por integracao. O Marlin foi
+feito para esse regime e o W4A4 para o outro.
+
+### Tres coisas de brinde
+
+**CUDA graph vale 3x no decode**, nos dois caminhos. Nao era o que se procurava, e
+e' o maior fator isolado que apareceu nesta rodada.
+
+**O ganho de prefill do ConvRot sobrevive ao controle**: 502 contra 1590 ms, 3,2x,
+com cache desligado e prompt identico nas quatro celulas.
+
+**O TTFT do ConvRot e mais ruidoso.** Com cache OFF, o Marlin da ganho
+quente/frio de -0,2% e -0,1% (correto, nao ha cache). O ConvRot da +11,6% e
++17,4% -- 58 a 125 ms de oscilacao sobre ~500. Flags conferidas: nao e' cache. E'
+variancia, e qualquer comparacao de TTFT do ConvRot abaixo desse patamar nao e
+sinal.
+
+## O que sobra na mesa
+
+Some o atalho de "consertar a integracao e o decode melhora". O que fica de pe e
+a ideia de **despacho por M**, que fica MAIS forte, nao menos, porque nao ha
+conserto de software esperando:
+
+    M pequeno (decode)      -> Marlin W4A16
+    M grande (prefill)      -> ConvRot W4A4
+    cruzamento medido        ~100
+
+Custo a calcular antes de propor: manter duas representacoes do mesmo peso na
+VRAM. Nao esta calculado.
+
+E o W4A8 real continua interessante por outro motivo -- o menor custo marginal da
+tabela, com pedagio alto. Se o pedagio cair, muda de figura. Numero de qualidade
+de outra sessao, em difusao: erro 2x menor que o `ACT_DTYPE=int8` (0,074 contra
+0,157). Nao verificado aqui.
