@@ -636,3 +636,193 @@ valores legais). Sage morto por `head_dim`.
 O que sobra e o que sempre foi: **contexto e o drafter**. GEMM e' 5,6 s dos 6,0 s
 de prefill em 8k -- 94%. Qualquer ganho serio de TTFT esta na quantizacao dos
 GEMM, nao em kernel de atencao nem de recorrencia.
+
+# BATERIA DE TTFT — 18/ago/2026, noite
+
+Primeira medicao de TTFT desta stack. Ate hoje so' existia tok/s de decode, o que
+e' a metrica errada para o uso declarado (repositorio inteiro no prompt, resposta
+curta): quem manda ali e' o tempo ate o primeiro token, nao a vazao depois.
+
+Uma placa (3090), sem draft, `max_model_len` 4096, `util` 0.93, KV dimensionado
+pelo vLLM, torre de visao desligada (`--limit-mm-per-prompt {"image":0,"video":0}`).
+
+Cada configuracao mede na ordem sonda -> frio -> quente -> decode. A ordem nao e'
+enfeite: a sonda come o JIT do Triton E a compilacao do caminho de decode. Uma
+versao anterior sondava com `max_tokens=1`, o que aquece so' o prefill, e a
+primeira geracao de verdade mediu 1,24 tok/s num servidor que faz 45.
+
+## Resultado
+
+| config | prompt | TTFT frio | TTFT quente | ganho do cache | decode |
+|---|---|---|---|---|---|
+| A  AWQ W4A16 bf16 (Marlin) | 2382 | 1854 ms | 346 ms | 81,3% | 45,93 tok/s |
+| B  AWQ W4A16 fp16 (Marlin) | 2382 | 1879 ms | 353 ms | 81,2% | 45,59 tok/s |
+| C  ConvRot W4A4 int4 MMA | 2301 | **530 ms** | 96 ms | 81,8% | 29,27 tok/s |
+| D  ConvRot W4A4, ativacao bf16 | 2382 | 2019 ms | 424 ms | 79,0% | 7,00 tok/s |
+
+## 1. O prefix caching ACERTA. 81%, e nunca tinha sido medido
+
+`--mamba-cache-mode align` estava ligado nos entrypoints desde sempre, e ninguem
+sabia se servia para alguma coisa. Serve: o mesmo prefixo repetido cai de 1854 ms
+para 346 ms.
+
+Numa validacao separada, com prompt de 2138 tokens e tres repeticoes no MESMO
+servidor, o ganho foi **91,3 / 91,4 / 91,5%** -- dentro de 0,2% entre si, com
+decode 44,9 a 45,3 (bate com os 44,59 ja registrados, entao o instrumento esta
+calibrado).
+
+Na bateria o ganho caiu para ~81%. Duas diferencas: prompt maior (2382 contra
+2138) e servidor recem-subido em vez de ja quente. Se o acerto degrada com prompt
+maior, seria consistente com a granularidade de checkpoint de 448 tokens que
+calculamos -- mas isso e HIPOTESE, nao medicao. Fica na fila.
+
+## 2. fp16 contra bf16: 1,4% em tudo. A hipotese estava certa no mecanismo
+
+A hipotese e do usuario, desta sessao: fp16 tem 10 bits de mantissa contra 7 do
+bf16, e num modelo ja quantizado o alcance esta domado pelas escalas, entao os 3
+bits a mais poderiam recuperar qualidade.
+
+Velocidade: **nao muda nada**, como previsto -- fp16 e bf16 tem a mesma vazao no
+tensor core do Ampere. 1854 vs 1879 ms de TTFT, 45,93 vs 45,59 de decode. Trocar
+nao custa.
+
+Confirmacao independente de outra sessao, em difusao na mesma classe de placa:
+±5% em quatro backends de atencao, ≤1% com backend forcado no SDPA.
+
+QUALIDADE CONTINUA SEM RESPOSTA, e isto e' um buraco do meu teste, nao um
+resultado. A bateria mede TTFT, cache e tok/s -- zero qualidade. Pior: cada
+configuracao usou semente de prompt diferente (`sem${RANDOM}`), entao as saidas de
+A e B nunca foram comparaveis nem se eu quisesse. Escrito
+`equivalencia_dtype.sh` para fechar isso: semente FIXA, greedy, diff da saida.
+
+E o modo de falha que quase passou batido, trazido de outra sessao com
+contraexemplo medido: fp16 estoura em 65504, e **overflow em fp16 produz `inf`,
+nao `NaN`**. `isnan` devolve False e a degradacao passa em silencio. O guard certo
+e' `isfinite`. Contraexemplo real: ativacao de 344064 num Z-Image, cinco vezes o
+teto. Modelo diferente, nao prova nada sobre Qwen -- mas mata a premissa de que
+ativacao real cabe em 65k.
+
+## 3. O int4 MMA nativo GANHA no prefill. 3,5x
+
+Esta e' a pergunta que a tabela antiga do compose nunca respondeu, porque so'
+media decode -- o unico regime onde o int4 nao pode ganhar por construcao.
+
+    A  AWQ W4A16, Marlin desempacota para bf16    1854 ms
+    C  ConvRot W4A4, int4 MMA m16n8k64 nativo      530 ms
+
+O mecanismo confere: no prefill o M e' grande (milhares de tokens), a conta e'
+limitada por COMPUTE, e o W4A16 faz os mesmos FLOP do bf16 mais o desempacote. O
+W4A4 e' o unico caminho que realmente aciona o tensor core int4 da GA102.
+
+E o preco aparece exatamente onde a teoria mandava:
+
+    decode  45,93 (AWQ)  contra  29,27 (ConvRot)   -36%
+
+No decode o M e' 1 a 8, a conta e' limitada por BANDA DE PESO, e o peso e' 4 bits
+nos dois casos -- entao o int4 so' paga a quantizacao de ativacao e nao tem onde
+cobrar. Era exatamente isso que a tabela antiga de tok/s estava medindo.
+
+### Onde as duas curvas cruzam
+
+Com os dois numeros medidos, para um pedido de 2382 tokens de prompt e G gerados:
+
+    AWQ       1854 + 21,8 G  ms
+    ConvRot    530 + 34,2 G  ms
+    cruzam em  G ~ 107 tokens
+
+Saida curta, ConvRot ganha. Saida longa, AWQ ganha. E o cruzamento anda para a
+DIREITA conforme o prompt cresce, porque a vantagem de prefill escala com P e a
+desvantagem de decode nao.
+
+Mas as duas alavancas competem entre si: com prefix caching acertando 81%, a
+segunda chamada com o mesmo prefixo quase nao paga prefill, e ai o AWQ volta a
+ganhar. Quem decide e' o padrao de uso real, nao a tabela.
+
+### Ressalvas que nao podem sumir
+
+- **Bases diferentes.** O ConvRot foi produzido aqui a partir de `source-heretic`;
+  o AWQ veio de outro lugar. Formas e compute sao identicos, entao o TEMPO e
+  comparavel -- a QUALIDADE nao e'.
+- **Custo de qualidade conhecido e nao medido aqui.** O proprio plugin registra:
+  "Quantizacao de ativacao em int4 degrada raciocinio mesmo com a saida
+  continuando fluente", com uma pergunta de primos que o W4A4 erra e o W4A16
+  acerta. A bateria nao testa nada disso.
+- **Prompt 3,4% menor no C** (2301 contra 2382), efeito colateral da semente
+  aleatoria por configuracao. Nao explica um fator de 3,5, mas e' imprecisao real.
+- **ConvRot nao roda sob PP=2** (morre no Dynamo), entao este ganho nao compoe com
+  a particao 56/8 que deu 65k de contexto.
+
+## 4. W4A8: o `int8` que existe NAO e' o tier W4A8
+
+Confirmado no codigo, e vale registrar porque a tabela do compose credita "17,8
+tok/s" a uma coisa que nao e' o que o nome sugere:
+
+    QWEN_W4A4_ACT_DTYPE=int8  ->  convrot_w4a4_linear(linear_dtype="int8")
+                                  ativacao int8 no LAYOUT DE PESO do W4A4
+
+    tier real                 ->  w4a8_int8_linear
+                                  import proprio, layout qdata + s_rel + s_channel
+
+O tier real foi abandonado por quebrar captura de CUDA graph no model runner que o
+DSpark exige. Nunca rodou aqui.
+
+Outra sessao esta medindo esse tier em bench de KERNEL PURO -- que nao tem model
+runner nem CUDA graph, e portanto consegue medir o que aqui nao da. Numero deles em
+difusao, contra W4A4: erro mediano **3,18x menor**, faixa 2,29 a 4,55x, custo de
++3,9% em disco e +2,5% em velocidade. Se confirmar, e' essa a ordem de grandeza que
+justifica consertar o CUDA graph aqui.
+
+### D e' o controle, e ele fecha o argumento
+
+C e D sao o MESMO checkpoint, o MESMO peso, o MESMO entrypoint. Muda uma variavel
+de ambiente:
+
+    QWEN_W4A4_ACT_DTYPE=int4   TTFT  530 ms   decode 29,3
+    QWEN_W4A4_ACT_DTYPE=bf16   TTFT 2019 ms   decode  7,0
+                                     3,8x           4,2x
+
+Entao o ganho do C NAO vem de nada do checkpoint ConvRot, da receita de
+quantizacao, nem da base heretic. Vem do tensor core int4. Sem o controle, a
+tabela A vs C seria ambigua: dois checkpoints, duas bases, dois caminhos. Com ele,
+sobra uma variavel so'.
+
+E o D tambem mede o que o comentario do `awq_entry.sh` afirmava sem numero: que o
+Marlin e' muito melhor que um dequant ingenuo. Confere, e o tamanho e' brutal no
+decode -- 45,9 contra 7,0, seis vezes e meia. No prefill a distancia quase some
+(1854 contra 2019), o que faz sentido: la a conta e' de compute e os dois acabam
+fazendo os mesmos FLOP em bf16.
+
+Leitura final das quatro linhas:
+
+    Marlin (A)          melhor decode com folga, prefill mediano
+    ConvRot int4 (C)    melhor prefill por 3,5x, decode 36% abaixo do Marlin
+    ConvRot bf16 (D)    pior dos dois mundos -- e' o dequant ingenuo
+
+## O que ficou de fora, e por que
+
+- **Qualidade**, em todas as quatro. Nenhuma foi submetida a bateria de acertos, e
+  o custo conhecido do int4 em raciocinio esta registrado no plugin sem numero.
+- **Equivalencia bf16 vs fp16 sob greedy**: ferramenta escrita
+  (`equivalencia_dtype.sh`), nao executada.
+
+## Erros deste turno, todos meus, todos custaram uma rodada
+
+1. **CRLF.** Meus edits via Python escreveram em modo texto no Windows, o que
+   converte o arquivo inteiro. Dentro do container Linux, `set -euo pipefail\r`
+   vira "invalid option name" e o `awq_entry.sh` morreu em 2 segundos. Tres shell
+   scripts estavam contaminados; os outros arquivos CRLF (`.env`, compose, `.ps1`,
+   Dockerfile, `.py`) ja eram assim e nao quebram -- so' bash nao tolera.
+2. **Prompt de 300 itens** dava ~8 mil tokens e estourava `max_model_len`: HTTP
+   400. E o medidor engolia o corpo do erro, entao o 400 nao ensinava nada.
+3. **Git Bash converteu** `/workspace/models/...` em
+   `C:/Program Files/Git/workspace/models/...` ao passar como argumento: HTTP 404
+   sobre um caminho que ninguem digitou. Corrigido eliminando a classe -- o medidor
+   PERGUNTA o nome ao servidor em `/v1/models`.
+4. **Sonda com `max_tokens=1`** aquecia so' o prefill; a primeira geracao pagou a
+   compilacao do decode e mediu 1,24 tok/s. Mesma licao do JIT que ja tinha me
+   pegado uma vez, agora no outro caminho.
+5. **Teto de boot em 540 s** cortou o C por 2 segundos (542) numa rodada em que o D
+   subiu em 440.
+
+O backup das configuracoes de antes da bateria esta em
+`backup-config/20260818-203718/`.
