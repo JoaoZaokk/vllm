@@ -21,6 +21,11 @@ gpu_lock_pegar "$(basename "${BASH_SOURCE[0]}" .sh)" 0 || exit 1
 trap gpu_lock_soltar EXIT
 
 
+# Baseline congelado: a unica config que ja subiu com draft. Sourced em vez de
+# repetido aqui, porque repetir foi exatamente como as duas metades divergiram e
+# custaram quatro rodadas. Exportar a variavel antes continua sobrescrevendo.
+. "$(dirname "${BASH_SOURCE[0]}")/baseline_congelado.env"
+
 IMG=${IMG:-qwen38-pp-dspark:0.27.1}
 # O drafter mora INTEIRO no ultimo estagio, e so a 3090 tem espaco. Sem esta
 # variavel o dspark_entry.sh escolhe sozinho e poe a 3090 como rank 0 ("3090
@@ -31,10 +36,10 @@ IMG=${IMG:-qwen38-pp-dspark:0.27.1}
 # Com 1,0 o estagio 0 e' a 3080 Ti, entao a particao poe POUCAS camadas nele.
 # 56,8 so' faria sentido com a 3090 no estagio 0.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,0}"
-PART=${PART:-16,48}
-UTIL=${UTIL:-0.88}
-LEN=${LEN:-8192}
-K=${K:-7}
+PART=${PART:-$VLLM_PP_LAYER_PARTITION}
+UTIL=${UTIL:-$GPU_MEMORY_UTILIZATION}
+LEN=${LEN:-$MAX_MODEL_LEN}
+K=${K:-$NUM_SPECULATIVE_TOKENS}
 # Estes dois defaults sao copiados da UNICA configuracao que ja subiu com draft:
 # escada_dspark_w4a4.sh em 16,48 / 8192, que deu 15.454 tokens de KV. Antes eles
 # divergiam e a rodada B morria com "No available memory" -- e o diagnostico
@@ -46,8 +51,8 @@ K=${K:-7}
 #              a placa de 12 GB: 6,39 GiB de peso em vez de 5,52. Diferenca 0,87.
 #
 # Somadas, as duas explicam a morte inteira sem tocar em uma camada sequer.
-DRAFT=${DRAFT_PATH:-/workspace/models/dspark-qwen38-w4a4}
-LIMIT_MM=${LIMIT_MM_PER_PROMPT-'{"image":0,"video":0}'}
+DRAFT=$DRAFT_PATH
+LIMIT_MM=$LIMIT_MM_PER_PROMPT
 PROMPT='Escreva uma funcao Python que inverte uma lista ligada. Explique cada passo.'
 # Raiz da stack (a que tem models/ e docker/), deduzida da localizacao deste
 # script: benchmarks/sm86 -> raiz do repo -> pai. Sobrescrevivel por ambiente

@@ -1333,6 +1333,82 @@ Nao prova que as variantes funcionam bem neste hibrido, sob PP, com DSpark, em
 v0.27.1. So' A/B prova.
 
 
+# O FREEZE VIROU ARQUIVO, E A FASE 6 TEM INSTRUMENTO — 19/ago/2026
+
+## `baseline_congelado.env`
+
+A causa das quatro falhas da equivalencia nao foi arquitetura: foi rodar sem
+querer uma configuracao diferente da que funciona. Paragrafo num registro nao
+impede isso; default impede. O baseline agora e' um arquivo que os scripts
+carregam:
+
+    MODEL_PATH               /workspace/models/awq-w4a16      alvo Marlin
+    DRAFT_PATH               .../dspark-qwen38-w4a4           drafter ConvRot
+    NUM_SPECULATIVE_TOKENS   7                                block_size do ckpt
+    VLLM_PP_LAYER_PARTITION  16,48
+    MAX_MODEL_LEN            8192
+    GPU_MEMORY_UTILIZATION   0.88
+    LIMIT_MM_PER_PROMPT      {"image":0,"video":0}
+    KV_CACHE_MEMORY_BYTES    vazio = dimensione
+
+Sobre k, registrado no proprio arquivo para nao virar folclore outra vez:
+
+    k=7    baseline nativo DESTE checkpoint
+    k<7    nao assumir valido nem invalido por teoria; testar so' com motivo
+    k=14   nao assumir "dois blocos = melhor"; exige benchmark
+
+`validar_dspark_pp.sh` agora carrega o arquivo em vez de repetir os valores --
+repetir foi exatamente como as duas metades divergiram.
+
+### Tres defeitos que so' o teste do arquivo revelou
+
+Escrever nao basta; rodar as tres formas de uso encontrou:
+
+  1. `${VAR-{"image":0,"video":0}}` perde as aspas internas na remocao de aspas
+     da expansao. Virava `{image:0,video:0}` -- JSON invalido, que teria voltado
+     ao comportamento de fabrica em silencio, reproduzindo o bug que o arquivo
+     existe para impedir. Trocado por `${VAR+definida}`, que separa "nao
+     definida" de "definida vazia" e preserva a valvula de escape.
+  2. `MAX_MODEL_LEN=10240 . baseline.env` NAO sobrescreve. O bash fora do modo
+     posix nao preserva atribuicao prefixada ao builtin `.`. So' funciona
+     `export MAX_MODEL_LEN=10240; . baseline.env`. Documentado no arquivo.
+  3. Ambos passaram em `bash -n`. Sintaxe valida, semantica errada -- de novo.
+
+## A Fase 6 nao precisa de instalacao nenhuma
+
+Tres instrumentos, todos ja' presentes:
+
+  1. **NVTX por camada e' uma FLAG**, nao trabalho de instrumentacao:
+     `--enable-layerwise-nvtx-tracing`, ligada em `compilation/wrapper.py:85` e
+     `v1/worker/gpu_model_runner.py:4053`. E' o que responde "onde vai o tempo
+     num passo DSpark k=7" quebrado por camada.
+  2. **`nsys` de Linux ja' esta no disco**, em
+     `/c/Program Files/NVIDIA Corporation/Nsight Systems 2025.6.3/target-linux-x64/nsys`.
+     A imagem NAO tem `nsys` nem `ncu` -- checado, ausentes -- mas o binario de
+     Linux monta como volume, sem rebuild. O de Windows nao serve: a carga roda
+     em container Linux.
+  3. **Profiler embutido do vLLM**: `POST /start_profile` e `/stop_profile`
+     (`entrypoints/serve/profile/api_router.py:21`), com `ProfilerConfig`
+     oferecendo `torch` ou `cuda`, `torch_profiler_dir`, `with_stack`,
+     `with_flops`, `record_shapes`. Nao exige nsys nenhum.
+
+O modulo `nvtx` de Python e `torch.cuda.nvtx` estao presentes na imagem.
+
+## Por que profiling vem ANTES de adaptive k
+
+Porque cada resultado do perfil manda em uma decisao ja' na fila, e nenhuma
+delas pode ser tomada sem ele:
+
+    Markov loop pequeno       adaptive k enterrado de vez
+    verify de M=8 pesado      adaptive k volta a valer olhar
+    taps cruzando PP pesados  reparticionar vira interessante por COMUNICACAO,
+                              nao por VRAM -- questao diferente da atual
+    GDN pesado no verifier    o trabalho de kernel do Spark ressuscita
+
+O teto do GDN no decode e' 8,5% medido, mas isso foi medido em decode normal. O
+verificador do DSpark e' outro regime de M, e ninguem mediu o GDN LA'.
+
+
 # O QUE FALTA
 
 ## Com GPU
@@ -1376,9 +1452,10 @@ v0.27.1. So' A/B prova.
 ## Sem GPU
 
   6. `.env` e `docker-compose.yml` continuam fora do git.
-  7. Nsight/NVTX nunca rodou. Enquanto nao rodar, mexer no kernel GDN e' aposta:
-     o teto medido do GDN no decode e' 8,5%, e so' o profiler diz quanto disso
-     aparece dentro do verifier do DSpark, que e' outro regime de M.
+  7. Nsight/NVTX nunca rodou -- mas nao falta ferramenta, ver a secao acima:
+     flag de NVTX por camada, `nsys` de Linux ja' no disco, e profiler embutido
+     no vLLM. Profiling vem ANTES de adaptive k, porque decide quatro itens
+     desta lista de uma vez.
 
 # SETE BUGS DE ARNES, CADA UM CUSTOU UMA RODADA
 
