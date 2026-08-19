@@ -359,6 +359,9 @@ class MultiModalConfig:
         return {
             "language_model_only": self.language_model_only,
             "enable_mm_embeds": self.enable_mm_embeds,
+            # Short-circuits the language model dummy run entirely
+            # (gpu_model_runner.py:5874, 6251, 6408).
+            "mm_encoder_only": self.mm_encoder_only,
             "zeroed_modalities": sorted(
                 modality
                 for modality in self.limit_per_prompt
