@@ -14,6 +14,17 @@
 # `NaN`. `isnan` devolve False e a degradacao passa em silencio. A verificacao
 # certa e `isfinite` -- e, aqui, a saida greedy divergir do baseline.
 set -uo pipefail
+# Lock unico da GPU. Duas sessoes do usuario dividem a mesma placa; cada uma com
+# um monitor esperando "a GPU liberar" dispara no mesmo segundo e estraga as
+# medicoes das duas. Este bloco e' obrigatorio em TODO script que sobe container
+# com --gpus ou roda bench -- inclusive nos escritos antes do lock existir, que
+# foi exatamente como eu furei o proprio protocolo uma vez.
+for _l in "$(dirname "${BASH_SOURCE[0]}")/gpu_lock.sh"           "$(dirname "${BASH_SOURCE[0]}")/../../../gpu_lock.sh"           /c/Users/USER/w4a4/gpu_lock.sh; do
+  [ -f "$_l" ] && { . "$_l"; break; }
+done
+gpu_lock_pegar "$(basename "${BASH_SOURCE[0]}" .sh)" 0 || exit 1
+trap gpu_lock_soltar EXIT
+
 export MSYS_NO_PATHCONV=1
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

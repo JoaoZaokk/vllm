@@ -975,3 +975,99 @@ E o W4A8 real continua interessante por outro motivo -- o menor custo marginal d
 tabela, com pedagio alto. Se o pedagio cair, muda de figura. Numero de qualidade
 de outra sessao, em difusao: erro 2x menor que o `ACT_DTYPE=int8` (0,074 contra
 0,157). Nao verificado aqui.
+
+# CURVA DE CRUZAMENTO E QUALIDADE — 18/ago/2026, fim da noite
+
+## Despacho por M esta descartado nesta maquina
+
+A ideia de rodar Marlin em M pequeno e ConvRot em M grande exige as duas
+representacoes do peso residentes. Medido, nao estimado:
+
+    pesos AWQ        17,41 GiB
+    pesos ConvRot    17,78 GiB
+                     --------
+    soma             35,19 GiB   contra 24 da placa
+
+Nem com PP=2 nas duas placas (36 GiB brutos) sobra para KV, ativacao e contexto
+CUDA. Falta 11 GiB, nao e' apertado. A ideia morre antes de qualquer dispatcher.
+
+Resta escolher UM caminho, e a curva abaixo e' quem decide.
+
+## A curva, com cache de prefixo DESLIGADO
+
+`curva_g.py` sobre `bateria_curva.sh`: dois boots apenas, o eixo G varre dentro
+do mesmo servidor. Prompt identico (2058 tokens), greedy, `min_tokens=g` para o
+modelo nao parar antes e mudar o ponto sem avisar, mediana de 3 repeticoes.
+
+| G | marlin | convrot | razao | ruido |
+|---|---|---|---|---|
+| 1 | 1593 ms | **436 ms** | 3,65x | 2,2% |
+| 16 | 1929 | **961** | 2,01x | 1,6% |
+| 32 | 2287 | **1497** | 1,53x | 1,7% |
+| 64 | 3025 | **2610** | 1,16x | 1,7% |
+| 96 | 3754 | 3719 | 1,01x | 1,4% |
+| 128 | **4436** | 4814 | 0,92x | 2,4% |
+| 192 | **5852** | 7048 | 0,83x | 0,4% |
+| 256 | **7292** | 9272 | 0,79x | 0,3% |
+| 512 | **12964** | 18291 | 0,71x | 0,7% |
+
+    marlin    intercepto 1593 ms   22,25 ms/token   44,9 tok/s
+    convrot   intercepto  436 ms   34,94 ms/token   28,6 tok/s
+
+**Cruzamento em G = 91 tokens** pelas retas; medido, esta entre 96 (empate em
+1,01x) e 128. O ruido fica entre 0,3 e 2,4%, muito abaixo das diferencas, entao
+o cruzamento e' sinal.
+
+A estimativa anterior, feita com DOIS pontos resolvendo uma reta, dizia ~107.
+Errou 17%, na direcao conservadora. Serviu para levantar a hipotese e nao servia
+para decidir.
+
+### Como ler isso para uso real
+
+Resposta abaixo de ~90 tokens, ConvRot ganha. Acima, Marlin. Para agente de
+codigo isso corta bem no meio: um patch curto ou uma resposta de uma funcao cai
+do lado do ConvRot; explicacao longa ou arquivo inteiro cai do lado do Marlin.
+
+RESSALVA QUE MUDA A CONCLUSAO E AINDA NAO FOI MEDIDA: esta curva e' com cache de
+prefixo DESLIGADO. Com cache ligado, o prefill da segunda chamada em diante quase
+nao acontece -- e e' o prefill que da os 3,65x ao ConvRot em G=1. Com repo
+repetido no prompt, o cruzamento deve andar bruscamente para a esquerda, possivel
+que para perto de zero. A curva com cache ON esta escrita
+(`PREFIX_CACHING=1 bash bateria_curva.sh`) e NAO foi executada.
+
+## fp16 contra bf16: a unica medicao de QUALIDADE da sessao
+
+`equivalencia_dtype.sh`: mesmo prompt, greedy, seed fixa, dois boots.
+
+    zero nao-finitos nos dois
+
+Testado com `isfinite`, nao `isnan` -- overflow em fp16 produz `inf` e `isnan`
+devolve False para `inf`, entao uma guarda ingenua nao veria nada. O
+contraexemplo de outra sessao (ativacao de 344064 num Z-Image, cinco vezes o teto
+de 65504 do fp16) **nao se transfere** para o Qwen nesta amostra, exatamente como
+aquela sessao advertiu que nao deveria ser assumido.
+
+Mas a saida DIVERGE. Bate ate o caractere 238 de 863:
+
+    bf16:  "...I'll need to define a Node class and a LinkedList class (or just..."
+    fp16:  "...I'll create a Node class and a LinkedList class\n2. An iterative r..."
+
+Divergir NAO prova que fp16 esta errado: 3 bits a mais de mantissa mudam o
+desempate entre logits proximos, e a divergencia aparece numa escolha de palavra.
+Prova que a troca NAO e' de graca -- velocidade identica (1,4%), saida diferente.
+Qual das duas acerta mais exige bateria de acertos, que continua sem existir.
+
+## Um furo de processo, e o conserto
+
+O `equivalencia_dtype.sh` rodou SEM pegar o lock da GPU, porque tinha sido escrito
+antes do lock existir. Eu escrevi o protocolo e depois o furei. Nenhuma colisao
+aconteceu por sorte, nao por cuidado.
+
+Auditoria de tudo que toca `--gpus` ou `nvidia-smi`: **dez** scripts estavam sem
+lock, nao um. Todos corrigidos, todos passando `bash -n`, todos em LF (escritos
+em modo binario -- modo texto no Windows gera CRLF e mata bash dentro do
+container, o que ja custou uma rodada nesta sessao).
+
+A regra ficou registrada em memoria como propriedade do ARQUIVO, nao de quem o
+escreveu: script que toca a placa e nao tem `gpu_lock_pegar` e' bug, e se
+consertar antes de rodar.

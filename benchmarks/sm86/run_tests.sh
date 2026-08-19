@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+
+# Lock unico da GPU: duas sessoes dividem a placa. Ver gpu-lock-protocolo.
+for _l in "$(dirname "${BASH_SOURCE[0]}")/gpu_lock.sh" "$(dirname "${BASH_SOURCE[0]}")/../../../gpu_lock.sh" /c/Users/USER/w4a4/gpu_lock.sh; do
+  [ -f "$_l" ] && { . "$_l"; break; }
+done
+gpu_lock_pegar "$(basename "${BASH_SOURCE[0]}" .sh)" 0 || exit 1
+trap gpu_lock_soltar EXIT
 # Monta cada .py alterado sobre o pacote instalado e roda a suite.
 #
 # Tres defeitos corrigidos apos auditoria:

@@ -9,6 +9,17 @@
 # produzir EXATAMENTE a mesma saida do decode normal. Se divergir, a verificacao
 # esta aceitando o que nao devia. Se bater, a aceitacao diz se vale a pena.
 set -uo pipefail
+# Lock unico da GPU. Duas sessoes do usuario dividem a mesma placa; cada uma com
+# um monitor esperando "a GPU liberar" dispara no mesmo segundo e estraga as
+# medicoes das duas. Este bloco e' obrigatorio em TODO script que sobe container
+# com --gpus ou roda bench -- inclusive nos escritos antes do lock existir, que
+# foi exatamente como eu furei o proprio protocolo uma vez.
+for _l in "$(dirname "${BASH_SOURCE[0]}")/gpu_lock.sh"           "$(dirname "${BASH_SOURCE[0]}")/../../../gpu_lock.sh"           /c/Users/USER/w4a4/gpu_lock.sh; do
+  [ -f "$_l" ] && { . "$_l"; break; }
+done
+gpu_lock_pegar "$(basename "${BASH_SOURCE[0]}" .sh)" 0 || exit 1
+trap gpu_lock_soltar EXIT
+
 
 IMG=${IMG:-qwen38-pp-dspark:0.27.1}
 # O drafter mora INTEIRO no ultimo estagio, e so a 3090 tem espaco. Sem esta
