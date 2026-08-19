@@ -24,7 +24,17 @@ gpu_lock_pegar() {
       return 0
     fi
 
-    # Lock existente: orfao ou vivo?
+    # Lock existente: o dono ainda respira? `kill -0` nao mata, so' testa.
+    # Sem isto, um vazamento (por exemplo um script que termina em `exec`, o que
+    # impede o trap EXIT de rodar) bloqueia a placa ate o teto de idade -- foi
+    # exatamente o que aconteceu e travou uma fila inteira de recuperacao.
+    local dono_pid=$(sed -n 's/^pid=//p' "$GPU_LOCK_ARQ" 2>/dev/null)
+    if [ -n "$dono_pid" ] && ! kill -0 "$dono_pid" 2>/dev/null; then
+      echo "[lock] dono pid=$dono_pid nao existe mais. Lock vazado, retomando."
+      rm -f "$GPU_LOCK_ARQ"
+      continue
+    fi
+
     local idade=$(( $(date +%s) - $(stat -c %Y "$GPU_LOCK_ARQ" 2>/dev/null || date +%s) ))
     if [ "$idade" -gt "$GPU_LOCK_MAX_IDADE" ]; then
       echo "[lock] lock com ${idade}s, acima do teto de ${GPU_LOCK_MAX_IDADE}s. Orfao:"

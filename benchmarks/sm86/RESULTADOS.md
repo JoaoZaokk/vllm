@@ -1071,3 +1071,144 @@ container, o que ja custou uma rodada nesta sessao).
 A regra ficou registrada em memoria como propriedade do ARQUIVO, nao de quem o
 escreveu: script que toca a placa e nao tem `gpu_lock_pegar` e' bug, e se
 consertar antes de rodar.
+
+# FILA DE GPU DA MADRUGADA — 19/ago/2026
+
+Cinco itens enfileirados, rodados em serie sob o lock. Tres entregaram, dois
+precisaram de duas ou tres tentativas, e um continua em execucao.
+
+## ENTREGOU: contexto do DSpark subiu de 4.928 para 8.192
+
+DSpark + PP=2, particao `16,48`, drafter `dspark-qwen38-w4a4`:
+
+    8192   SUBIU em 331s   GPU KV cache 15.454 tokens, concorrencia 1,89x
+    16384  nao coube       (estimativa do vLLM: 6.272 -- estimativa mente aqui,
+                            ver o topo deste arquivo; vale como direcao, nao
+                            como numero)
+
+O 4.928 antigo NUNCA foi medicao: era `1,25 GiB / custo por token`, constante
+travada pelo `${VAR:-default}` do KV. Duas correcoes de hoje foram necessarias
+para este numero existir:
+
+  - `KV_CACHE_MEMORY_BYTES` com um traco so, para vazio significar "dimensione"
+  - particao `16,48` em vez de `28,36`. Com `CUDA_VISIBLE_DEVICES=1,0` o estagio
+    0 e' a 3080 Ti, e 28 das 64 camadas davam
+    `Worker_PP0 Available KV cache memory: -0.41 GiB` -- negativo, zero espaco.
+
+## ENTREGOU: a curva com cache LIGADO decide a escolha do modelo
+
+Mesmo prompt (2058 tokens), greedy, `min_tokens` obrigando G exato, mediana de 3:
+
+| G | marlin | convrot | razao |
+|---|---|---|---|
+| 16 | **431 ms** | 630 ms | 0,68x |
+| 64 | **1467** | 2274 | 0,65x |
+| 128 | **2883** | 4491 | 0,64x |
+| 512 | **11437** | 17954 | 0,64x |
+
+**Marlin ganha em TODOS os G. O cruzamento de 91 tokens desaparece.**
+
+As inclinacoes nao mudaram (22,2 e 34,9 ms/token, as mesmas de cache OFF); so' o
+intercepto caiu -- 1593 -> ~90 no Marlin, 436 -> ~108 no ConvRot. Como a vantagem
+inteira do ConvRot era prefill, o cache a apaga e sobra so' a desvantagem de
+decode.
+
+Para agente de codigo com repo repetido no prompt: **AWQ/Marlin**.
+
+Os pontos de G=1 tem ruido de 1688% e 309% e NAO sao dados -- com cache o tempo
+cai para ~90 ms e a primeira das 3 repeticoes e fria. G>=16 tem ruido de 0,3 a
+5,5% e vale.
+
+## ENTREGOU: os patches do fork estao verdes, com GPU
+
+    test_qwen35_dspark_aux_taps_pp.py      9 passed
+    test_mamba_hybrid_model_state.py       2 passed
+    test_eagle3_aux_hidden_states_pp.py   14 passed
+    test_spec_decode_embed_sharing_pp.py  19 passed
+                                          44 passed, 0 failed
+
+Primeira vez que esta suite roda com placa: o `run_tests.sh` antigo rodava sem
+`--gpus` e saia 0 mesmo com a suite vermelha.
+
+Os 3 vermelhos de uma rodada anterior eram todos de `test_eagle3_pp.py`, o e2e
+que baixa Llama-3.2-1B e tem parametrizacao pedindo 4 GPUs. Ambiente, nao codigo.
+
+## ENTREGOU: sweep de GEMM nas cinco formas, com auto-refutacao
+
+`q_proj`, `o_proj`, `gate_proj`, `down_proj`, `gdn_qkvz`. Padrao consistente:
+Marlin com o menor pedagio fixo (22-71 us), ConvRot com o menor custo marginal.
+
+E o ajuste se auto-limita: tres caminhos deram inclinacao NEGATIVA
+(bf16 -0,246, convrot_a4 -0,236, w4a8_real -0,035 us/linha). Impossivel
+fisicamente. Prova que naquela faixa a curva e' PLANA, dominada por overhead, e
+que so' o INTERCEPTO tem significado. Ler `b` como throughput seria repetir o
+erro do "87% do pico" que foi riscado mais cedo.
+
+## EM EXECUCAO: equivalencia greedy do DSpark sob PP=2
+
+Rodada A (sem draft) sobe e gera 1328 bytes. Rodada B (k=7) falhou tres vezes,
+cada uma por um motivo diferente e nenhum do modelo:
+
+  1. `-0,41 GiB` de KV com particao 28,36
+  2. `python3` do HOST aponta para um `C:\Python314\python.exe` quebrado -- so'
+     `python` funciona. As duas funcoes que parseiam a resposta usavam python3,
+     entao a saida vinha vazia e o veredito dizia "incompleto"
+  3. `LEN=32768` fixo no script: com draft pede 3,93 GiB de KV contra 2,99
+     disponiveis. A sem draft cabe em 32k, a B nao
+
+Rodando agora com `PART=16,48 LEN=8192`, que e' o teto que a escada provou.
+
+O que o resultado significa: as duas rodadas usam o MESMO entrypoint, mesma
+particao, mesmo tudo -- so' muda k=0 contra k=7. Antes A usava `awq_entry` e B
+usava `dspark_entry`, com defaults diferentes de dtype de cache mamba, e a
+comparacao tinha mais de uma variavel. Se der IDENTICO agora, prova que a
+verificacao especulativa esta correta sob PP -- que e' o unico sintoma
+observavel de tap faltando, duplicado ou fora de ordem.
+
+# O QUE FALTA
+
+## Com GPU
+
+  1. **Terminar a equivalencia greedy** (rodando). Se der DIVERGIU, o
+     encaminhamento de aux taps entre estagios esta aceitando token que o alvo
+     nao produziria, e o alvo do conserto e' `qwen3_next.py`.
+  2. **Teto de contexto do DSpark entre 8k e 16k.** Escada com degraus de
+     10240 / 12288 / 14336. A estimativa de 6.272 do vLLM contradiz o boot de
+     8192 que funcionou, entao a estimativa esta errada e so' escada resolve.
+  3. **Bateria de acertos.** NENHUMA medicao de qualidade existe alem do diff
+     de fp16. As 8 perguntas que produziram os "7/8" da tabela do compose nao
+     estao versionadas em lugar nenhum. Sem isso, "ConvRot degrada raciocinio"
+     e' citacao de comentario, nao medicao.
+  4. **W4A8 real dentro do vLLM.** Roda em bench de kernel (as duas falhas eram
+     de chamada, minhas). Quebra na captura de CUDA graph no model runner. Tem o
+     menor custo marginal da tabela. Vale tentar depois de 1-3.
+
+## Sem GPU
+
+  5. Commitar e empurrar este registro.
+  6. `.env` e `docker-compose.yml` continuam fora do git.
+
+# CINCO BUGS DE ARNES, CADA UM CUSTOU UMA RODADA
+
+Nenhum apareceu em `bash -n`. Vale como lista de verificacao:
+
+  1. **CRLF** -- edits em Python no modo texto do Windows convertem o arquivo
+     inteiro; `set -euo pipefail\r` mata bash dentro do container. Escrever em
+     modo BINARIO.
+  2. **`pgrep` nao existe** neste Git Bash. Usei como teste de vida do processo,
+     o comando falhou, o `||` leu como "morreu" e o monitor saiu enquanto a fila
+     seguia rodando.
+  3. **`exec` vaza o lock** -- `run_tests.sh` termina em `exec docker run`, que
+     substitui o processo, entao o `trap EXIT` nunca dispara. O lock ficou preso
+     e bloqueou uma fila inteira de recuperacao. Consertado nos dois niveis: o
+     script solta antes do exec, e `gpu_lock_pegar` agora testa o dono com
+     `kill -0` e retoma lock vazado.
+  4. **`python3` quebrado no host** (aponta para C:\Python314 inexistente).
+  5. **Coleta ampla demais no pytest** -- mandar `.` colhe a arvore inteira do
+     vLLM: 152 erros de coleta em 9 minutos, de testes que pedem Blackwell,
+     ROCm ou CPU-only.
+
+E um furo de processo: rodei `equivalencia_dtype.sh` sem pegar o lock porque
+aquele script era anterior ao lock. A auditoria seguinte achou DEZ scripts sem
+lock, nao um. Todos corrigidos. Registrado em memoria como propriedade do
+ARQUIVO, nao de quem o escreveu.

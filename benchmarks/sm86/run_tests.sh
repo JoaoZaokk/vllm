@@ -67,6 +67,10 @@ ALVO=("$@")
 
 # -rs lista o motivo de cada skip: e' o que separa "passou" de "nem rodou".
 # O status do pytest sai inteiro porque nao ha pipe depois dele.
+# `exec` substitui o processo: o trap EXIT nao dispara e o lock vazaria.
+# Soltar aqui, porque daqui o script nao volta.
+gpu_lock_soltar
+trap - EXIT
 MSYS_NO_PATHCONV=1 exec docker run --rm "${ARGS[@]}" \
   --entrypoint bash qwen38-w4a4:latest -c \
-  "pip install -q pytest >/dev/null 2>&1; cd /tests && python3 -m pytest ${ALVO[*]} -q --no-header -rs -p no:cacheprovider"
+  "pip install -q pytest tblib >/dev/null 2>&1; cd /tests && python3 -m pytest ${ALVO[*]} -q --no-header -rs -p no:cacheprovider"

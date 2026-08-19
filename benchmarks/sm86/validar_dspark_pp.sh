@@ -53,7 +53,8 @@ SAIDA_SPEC="$STACK/saida_dspark.json"
 : > "$OUT"
 
 subir() {  # $1=nome  $2=entry  $3=spec_k
-  docker rm -f val >/dev/null 2>&1
+  docker logs val > "$STACK/logs/validar_${rodada:-x}.log" 2>&1 || true
+docker rm -f val >/dev/null 2>&1
   MSYS_NO_PATHCONV=1 docker run -d --name val --gpus all -p 8000:8000 --entrypoint bash --shm-size=8g \
     -v vllm-cache:/root/.cache/vllm -v triton-cache:/root/.triton \
     -v "${STACK_MNT}/models:/workspace/models:ro" \
@@ -76,11 +77,11 @@ subir() {  # $1=nome  $2=entry  $3=spec_k
 gerar() {  # imprime os ids gerados, temperatura 0
   curl -s http://127.0.0.1:8000/v1/completions -H 'Content-Type: application/json' \
     -d "{\"model\":\"/workspace/models/awq-w4a16\",\"prompt\":\"$PROMPT\",\"max_tokens\":160,\"temperature\":0,\"seed\":1234,\"logprobs\":0}" \
-    | python3 -c "import json,sys; d=json.load(sys.stdin); c=d['choices'][0]; print(json.dumps(c.get('logprobs',{}).get('tokens') or c['text']))"
+    | python -c "import json,sys; d=json.load(sys.stdin); c=d['choices'][0]; print(json.dumps(c.get('logprobs',{}).get('tokens') or c['text']))"
 }
 
 aceitacao() {
-  curl -s http://127.0.0.1:8000/metrics | python3 -c "
+  curl -s http://127.0.0.1:8000/metrics | python -c "
 import sys,re
 t=sys.stdin.read()
 def g(n):
@@ -96,21 +97,25 @@ print(f'aceitos={a:.0f} rascunhos={d:.0f} taxa={a/d:.4f}' if d else 'sem contado
 # diferentes de dtype de cache mamba e montam flags diferentes, entao a
 # comparacao tinha mais de uma variavel e a equivalencia nao provava nada.
 echo "== A: PP=2 sem draft (referencia) ==" | tee -a $OUT
+rodada=A
 if subir A dspark_entry.sh 0; then
   gerar > "$SAIDA_REF"
   echo "  subiu, $(wc -c < "$SAIDA_REF") bytes de saida" | tee -a $OUT
 else
   echo "  FALHOU: $(docker logs val 2>&1 | grep -oE 'No available memory|estimated maximum model length is [0-9]+|NotImplementedError[^\"]*' | tail -1)" | tee -a $OUT
 fi
+docker logs val > "$STACK/logs/validar_${rodada:-x}.log" 2>&1 || true
 docker rm -f val >/dev/null 2>&1
 
 echo "== B: PP=2 + DSpark k=$K ==" | tee -a $OUT
+rodada=B
 if subir B dspark_entry.sh "$K"; then
   gerar > "$SAIDA_SPEC"
   echo "  subiu | $(aceitacao)" | tee -a $OUT
 else
   echo "  FALHOU: $(docker logs val 2>&1 | grep -oE 'No available memory|SupportsPP|NotImplementedError[^\"]*|Unsupported context manager' | tail -1)" | tee -a $OUT
 fi
+docker logs val > "$STACK/logs/validar_${rodada:-x}.log" 2>&1 || true
 docker rm -f val >/dev/null 2>&1
 
 echo "== veredito ==" | tee -a $OUT
