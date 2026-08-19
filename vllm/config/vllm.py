@@ -449,11 +449,11 @@ class VllmConfig:
         vllm_factors.append(__version__)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
-            if (
-                self.compilation_config
-                and getattr(self.compilation_config, "compile_mm_encoder", False)
-                and self.model_config.multimodal_config
-            ):
+            # Not gated on compile_mm_encoder. That flag decides whether the
+            # vision encoder itself is compiled; the language model graph
+            # depends on whether the multimodal path is active at all, which is
+            # a different question and is answered by this config either way.
+            if self.model_config.multimodal_config:
                 vllm_factors.append(self.model_config.multimodal_config.compute_hash())
         else:
             vllm_factors.append("None")

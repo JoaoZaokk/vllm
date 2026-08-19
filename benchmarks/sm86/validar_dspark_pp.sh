@@ -36,23 +36,13 @@ IMG=${IMG:-qwen38-pp-dspark:0.27.1}
 # Com 1,0 o estagio 0 e' a 3080 Ti, entao a particao poe POUCAS camadas nele.
 # 56,8 so' faria sentido com a 3090 no estagio 0.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,0}"
-PART=${PART:-$VLLM_PP_LAYER_PARTITION}
-UTIL=${UTIL:-$GPU_MEMORY_UTILIZATION}
-LEN=${LEN:-$MAX_MODEL_LEN}
-K=${K:-$NUM_SPECULATIVE_TOKENS}
-# Estes dois defaults sao copiados da UNICA configuracao que ja subiu com draft:
-# escada_dspark_w4a4.sh em 16,48 / 8192, que deu 15.454 tokens de KV. Antes eles
-# divergiam e a rodada B morria com "No available memory" -- e o diagnostico
-# apontou para a particao, que era a variavel IGUAL entre as duas.
+# Nao ha copia local de PART/LEN/K/UTIL/DRAFT aqui de proposito. Uma variavel
+# local que PARECE um override e nao e lido por ninguem e a mesma falha que
+# custou quatro rodadas, so que silenciosa. Para mudar qualquer coisa:
 #
-#   drafter    dspark-qwen38 (bf16, 2,6 G) contra dspark-qwen38-w4a4 (1,3 G)
-#              PP1 carregava 17,57 GiB de peso em vez de 15,48. Diferenca 2,09.
-#   LIMIT_MM   vazio perfila a torre de visao e aloca o encoder no estagio 0,
-#              a placa de 12 GB: 6,39 GiB de peso em vez de 5,52. Diferenca 0,87.
+#   export MAX_MODEL_LEN=10240; bash validar_dspark_pp.sh
 #
-# Somadas, as duas explicam a morte inteira sem tocar em uma camada sequer.
-DRAFT=$DRAFT_PATH
-LIMIT_MM=$LIMIT_MM_PER_PROMPT
+# O valor aparece no banner antes do boot, entao o log diz o que rodou.
 PROMPT='Escreva uma funcao Python que inverte uma lista ligada. Explique cada passo.'
 # Raiz da stack (a que tem models/ e docker/), deduzida da localizacao deste
 # script: benchmarks/sm86 -> raiz do repo -> pai. Sobrescrevivel por ambiente
@@ -98,19 +88,13 @@ subir() {  # $1=nome  $2=entry  $3=spec_k
   docker logs val > "$STACK/logs/validar_${rodada:-x}.log" 2>&1 || true
 docker rm -f val >/dev/null 2>&1
   esperar_vram
-  MSYS_NO_PATHCONV=1 docker run -d --name val --gpus all -p 8000:8000 --entrypoint bash --shm-size=8g \
-    -v vllm-cache:/root/.cache/vllm -v triton-cache:/root/.triton \
-    -v "${STACK_MNT}/models:/workspace/models:ro" \
-    -v "${STACK_MNT}/docker:/opt/qwen38/docker:ro" \
-    -v "${STACK_MNT}/plugin/qwen_w4a4_vllm:/usr/local/lib/python3.12/dist-packages/qwen_w4a4_vllm:ro" \
-    -e PIPELINE_PARALLEL_SIZE=2 -e VLLM_PP_LAYER_PARTITION="$PART" \
-    -e MODEL_PATH=/workspace/models/awq-w4a16 -e QUANTIZATION= \
-    -e CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
-    -e DRAFT_PATH="$DRAFT" \
-    -e NUM_SPECULATIVE_TOKENS="$3" -e MAX_MODEL_LEN="$LEN" -e MAX_NUM_SEQS=2 \
-    -e GPU_MEMORY_UTILIZATION="$UTIL" -e KV_CACHE_MEMORY_BYTES= \
-    -e LIMIT_MM_PER_PROMPT="$LIMIT_MM" \
-    -e VLLM_DISABLE_COMPILE_CACHE=1 \
+  # A lista de -e e de -v vive em baseline_congelado.env. Repetir aqui foi
+  # exatamente como este script rodou quatro vezes com o drafter errado.
+  baseline_docker_args "$3"
+  baseline_docker_mounts "$STACK_MNT"
+  MSYS_NO_PATHCONV=1 docker run -d --name val --gpus all -p 8000:8000 \
+    --entrypoint bash --shm-size=8g \
+    "${BASELINE_DOCKER_MOUNTS[@]}" "${BASELINE_DOCKER_ARGS[@]}" \
     "$IMG" "/opt/qwen38/docker/$2" >/dev/null 2>&1
   for i in $(seq 1 75); do
     curl -s -f http://127.0.0.1:8000/health >/dev/null 2>&1 && return 0

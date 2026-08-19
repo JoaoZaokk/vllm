@@ -451,7 +451,21 @@ class ModelConfig:
         # affects the computation graph of the language model, therefore we add it
         # here early.
         if self.multimodal_config:
-            factors["language_model_only"] = self.multimodal_config.language_model_only
+            mm_config = self.multimodal_config
+            factors["language_model_only"] = mm_config.language_model_only
+            # There are two ways to reach text-only mode and they must be
+            # indistinguishable to the cache key, because they are
+            # indistinguishable to the model: pinning every modality to zero
+            # through limit_mm_per_prompt makes supports_multimodal_inputs
+            # return False exactly as this flag does, which changes whether the
+            # language model is handed inputs_embeds or None. limit_mm_per_prompt
+            # itself stays in ignored_factors: a limit of one versus two does not
+            # touch the graph, only a limit of zero does.
+            factors["mm_zeroed_modalities"] = sorted(
+                modality
+                for modality in mm_config.limit_per_prompt
+                if mm_config.get_limit_per_prompt(modality) == 0
+            )
         return hash_factors(factors)
 
     def _update_nested(
