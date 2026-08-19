@@ -1406,6 +1406,16 @@ Rodando a combinacao que matou as quatro tentativas, o banner a delata em duas
 linhas antes de qualquer container subir. Custo: uma funcao no `.env`, uma
 chamada no script. Zero divida de harness.
 
+### Regra operacional, nao ferramenta
+
+O banner e' parte OBRIGATORIA da evidencia de qualquer benchmark daqui em diante.
+Numero sem a configuracao resolvida que apareceu antes do boot nao e' medicao,
+e' boato. "Deu 73 tok/s" so' vale acompanhado do bloco.
+
+Sem isso e' impossivel saber, uma semana depois, se o numero veio do baseline
+atual ou de uma config anterior -- que e' exatamente a classe de erro que custou
+quatro rodadas desta sessao, e a unica que nenhum patch conserta.
+
 ## A Fase 6 nao precisa de instalacao nenhuma
 
 Tres instrumentos, todos ja' presentes:
