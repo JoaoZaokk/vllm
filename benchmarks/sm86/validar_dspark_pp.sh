@@ -31,13 +31,23 @@ IMG=${IMG:-qwen38-pp-dspark:0.27.1}
 # Com 1,0 o estagio 0 e' a 3080 Ti, entao a particao poe POUCAS camadas nele.
 # 56,8 so' faria sentido com a 3090 no estagio 0.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,0}"
-PART=${PART:-28,36}
+PART=${PART:-16,48}
 UTIL=${UTIL:-0.88}
-LEN=${LEN:-32768}
+LEN=${LEN:-8192}
 K=${K:-7}
-# Vazio = comportamento de fabrica. '{"image":0,"video":0}' pula o perfilamento
-# da torre de visao, que aloca o encoder no estagio 0 -- a placa de 12 GB.
-LIMIT_MM=${LIMIT_MM_PER_PROMPT-}
+# Estes dois defaults sao copiados da UNICA configuracao que ja subiu com draft:
+# escada_dspark_w4a4.sh em 16,48 / 8192, que deu 15.454 tokens de KV. Antes eles
+# divergiam e a rodada B morria com "No available memory" -- e o diagnostico
+# apontou para a particao, que era a variavel IGUAL entre as duas.
+#
+#   drafter    dspark-qwen38 (bf16, 2,6 G) contra dspark-qwen38-w4a4 (1,3 G)
+#              PP1 carregava 17,57 GiB de peso em vez de 15,48. Diferenca 2,09.
+#   LIMIT_MM   vazio perfila a torre de visao e aloca o encoder no estagio 0,
+#              a placa de 12 GB: 6,39 GiB de peso em vez de 5,52. Diferenca 0,87.
+#
+# Somadas, as duas explicam a morte inteira sem tocar em uma camada sequer.
+DRAFT=${DRAFT_PATH:-/workspace/models/dspark-qwen38-w4a4}
+LIMIT_MM=${LIMIT_MM_PER_PROMPT-'{"image":0,"video":0}'}
 PROMPT='Escreva uma funcao Python que inverte uma lista ligada. Explique cada passo.'
 # Raiz da stack (a que tem models/ e docker/), deduzida da localizacao deste
 # script: benchmarks/sm86 -> raiz do repo -> pai. Sobrescrevivel por ambiente
@@ -62,6 +72,7 @@ docker rm -f val >/dev/null 2>&1
     -e PIPELINE_PARALLEL_SIZE=2 -e VLLM_PP_LAYER_PARTITION="$PART" \
     -e MODEL_PATH=/workspace/models/awq-w4a16 -e QUANTIZATION= \
     -e CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
+    -e DRAFT_PATH="$DRAFT" \
     -e NUM_SPECULATIVE_TOKENS="$3" -e MAX_MODEL_LEN="$LEN" -e MAX_NUM_SEQS=2 \
     -e GPU_MEMORY_UTILIZATION="$UTIL" -e KV_CACHE_MEMORY_BYTES= \
     -e LIMIT_MM_PER_PROMPT="$LIMIT_MM" \
@@ -96,6 +107,7 @@ print(f'aceitos={a:.0f} rascunhos={d:.0f} taxa={a/d:.4f}' if d else 'sem contado
 # Antes A usava awq_entry.sh e B usava dspark_entry.sh: os dois tem defaults
 # diferentes de dtype de cache mamba e montam flags diferentes, entao a
 # comparacao tinha mais de uma variavel e a equivalencia nao provava nada.
+echo "config: PART=$PART LEN=$LEN K=$K draft=$DRAFT limit_mm=${LIMIT_MM:-<vazio>}" | tee -a $OUT
 echo "== A: PP=2 sem draft (referencia) ==" | tee -a $OUT
 rodada=A
 if subir A dspark_entry.sh 0; then

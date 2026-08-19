@@ -1204,15 +1204,38 @@ Nao ha o que aumentar: ja esta em 0,88, e no boot a 3090 tem 22,6 de 24 GiB
 livres. Nao falta memoria na maquina, falta memoria NAQUELE estagio. O que
 resolve e' redistribuir camadas, nao afrouxar o teto.
 
-### O alvo do proximo teste, com numero
+### CORRECAO: o alvo era outro, e o diagnostico acima errou o lever
 
-`PART=16,48` foi escolhida quando `LEN` era 32768 -- so' 16 camadas no estagio 0
-porque o KV de 32k nao cabia na placa de 12 GB. Com `LEN=8192` a necessidade de
-KV do estagio 0 caiu 4x, e ele sobrou com 2,19 GiB. Entao da' para empurrar
-camadas de volta para a 3080 Ti e aliviar a 3090, que e' quem carrega o drafter.
+O paragrafo original desta secao mandava repartir em `20,44` e `24,40`. Errado.
+Comparando o log da rodada que MORREU com o log da escada que SUBIU, a particao
+e' a variavel IGUAL entre as duas. Mesma `16,48`, mesmo `LEN=8192`, mesmo `k=7`,
+mesmo alvo `awq-w4a16`. Duas outras coisas mudaram:
 
-Degraus a testar, nesta ordem: **`20,44`** e **`24,40`**. Nao rodados -- a placa
-saiu da minha mao antes.
+| | escada (subiu) | validar B (morreu) |
+|---|---|---|
+| drafter | `dspark-qwen38-w4a4`, 1,3 G | `dspark-qwen38`, 2,6 G |
+| `LIMIT_MM_PER_PROMPT` | `{"image":0,"video":0}` | vazio |
+| PP0 pesos | 5,52 GiB | 6,39 GiB |
+| PP1 pesos | 15,48 GiB | 17,57 GiB |
+| resultado | 15.454 tokens de KV | `No available memory` |
+
+    17,57 - 15,48 = 2,09 GiB   drafter em bf16 no lugar do W4A4
+     6,39 -  5,52 = 0,87 GiB   torre de visao perfilada no estagio 0
+
+Somadas, as duas explicam a morte inteira sem tocar em uma camada sequer.
+
+A causa de raiz e' de configuracao, nao de alocacao: `validar_dspark_pp.sh` nunca
+passava `DRAFT_PATH`, entao herdava o default bf16 do `dspark_entry.sh:27`. E
+deixava `LIMIT_MM` vazio, apesar de o comentario logo acima -- escrito por mim --
+explicar exatamente por que nao deveria.
+
+Os dois defaults agora sao copiados da unica configuracao que ja provou subir com
+draft. Repartir continua sendo alavanca valida se ela voltar a apertar, mas nao e'
+o primeiro passo e nunca teve evidencia apontando para ela.
+
+Licao do erro: eu tinha os dois logs e comparei a rodada morta contra a rodada A
+(sem draft) em vez de compara-la contra a rodada que JA TINHA SUBIDO com draft. A
+comparacao certa era com o vizinho que funciona, nao com o controle.
 
 Enquanto isso nao roda, o encaminhamento de aux taps entre estagios continua
 **sem criterio de aceite**. Nada aqui indica que ele esteja errado; indica que
@@ -1222,13 +1245,18 @@ ele nunca foi testado.
 
 ## Com GPU
 
-  1. **Fazer a rodada B da equivalencia greedy SUBIR.** Quatro tentativas, zero
-     medicoes. Proximo passo com numero: `PART=20,44` e depois `24,40`, com
-     `LEN=8192`, porque o aperto esta comprovadamente na 3090 (que carrega o
-     drafter, >=2,4 GiB) e o estagio 0 sobrou com 2,19 GiB. So' depois disso a
-     pergunta original -- IDENTICO ou DIVERGIU -- pode ser feita. Se der
-     DIVERGIU, o encaminhamento de aux taps esta aceitando token que o alvo nao
-     produziria, e o alvo do conserto e' `qwen3_next.py`.
+  1. **Rodar a equivalencia greedy com os defaults consertados.** Quatro
+     tentativas, zero medicoes. O script agora usa drafter W4A4 e
+     `LIMIT_MM_PER_PROMPT` zerado, que e' a configuracao ja provada em 16,48 /
+     8192. So' depois disso a pergunta original -- IDENTICO ou DIVERGIU -- pode
+     ser feita. Se der DIVERGIU, o encaminhamento de aux taps esta aceitando
+     token que o alvo nao produziria, e o alvo do conserto e' `qwen3_next.py`.
+  1b. **Medir tok/s e aceitacao do Marlin + DSpark.** NUNCA foi medido. Nao e' um
+     A/B novo: `dspark_entry.sh:22` tem default de fabrica ConvRot, mas toda
+     rodada DSpark que subiu sobrescreve com `MODEL_PATH=awq-w4a16`. Marlin +
+     DSpark ja' e' o que roda; falta ler os contadores. ConvRot + DSpark sob PP
+     nao esta disponivel para comparar -- `dspark_entry.sh:24` registra que
+     convrot+PP morre no Dynamo. Esse A/B so' existe em GPU unica.
   2. **Teto de contexto do DSpark entre 8k e 16k.** Escada com degraus de
      10240 / 12288 / 14336. A estimativa de 6.272 do vLLM contradiz o boot de
      8192 que funcionou, entao a estimativa esta errada e so' escada resolve.
@@ -1236,16 +1264,28 @@ ele nunca foi testado.
      de fp16. As 8 perguntas que produziram os "7/8" da tabela do compose nao
      estao versionadas em lugar nenhum. Sem isso, "ConvRot degrada raciocinio"
      e' citacao de comentario, nao medicao.
-  4. **W4A8 real dentro do vLLM.** Roda em bench de kernel (as duas falhas eram
+  4. **TurboQuant / INT4 no cache de KV.** NAO e' port: `vllm/config/cache.py:19`
+     ja' aceita `turboquant_k8v4`, `turboquant_4bit_nc`, `turboquant_k3v4_nc`,
+     `turboquant_3bit_nc`, `int4_per_token_head`. O backend e' Triton e
+     `triton_turboquant_decode.py:25` tem caminho explicito para `cap < (8,9)`,
+     que e' onde sm_86 cai; o docstring do backend usa head_dim=256 de exemplo,
+     exatamente o nosso -- o mesmo 256 que barrou SageAttention.
+     RESSALVA QUE LIMITA O GANHO: cobre so' as 16 camadas de atencao cheia. O
+     estado GDN das outras 48 usa `MambaDType` (`cache.py:37`), que aceita
+     apenas `auto/float32/float16/bfloat16`. Nenhuma opcao quantizada, e ja'
+     estamos em bf16. Nao desce mais por ali.
+  5. **W4A8 real dentro do vLLM.** Roda em bench de kernel (as duas falhas eram
      de chamada, minhas). Quebra na captura de CUDA graph no model runner. Tem o
      menor custo marginal da tabela. Vale tentar depois de 1-3.
 
 ## Sem GPU
 
-  5. Commitar e empurrar este registro.
   6. `.env` e `docker-compose.yml` continuam fora do git.
+  7. Nsight/NVTX nunca rodou. Enquanto nao rodar, mexer no kernel GDN e' aposta:
+     o teto medido do GDN no decode e' 8,5%, e so' o profiler diz quanto disso
+     aparece dentro do verifier do DSpark, que e' outro regime de M.
 
-# SEIS BUGS DE ARNES, CADA UM CUSTOU UMA RODADA
+# SETE BUGS DE ARNES, CADA UM CUSTOU UMA RODADA
 
 Nenhum apareceu em `bash -n`. Vale como lista de verificacao:
 
@@ -1270,6 +1310,11 @@ Nenhum apareceu em `bash -n`. Vale como lista de verificacao:
      wrapper nao e' a raiz da stack. Saiu com codigo 2 e o evento chegou como
      "failed", quando na verdade o script tinha terminado normalmente e escrito
      o veredito. Caminho absoluto em wrapper, sempre.
+
+  7. **Barra dupla em heredoc chega como barra simples** -- e uma barra seguida de nova linha
+     DENTRO de string Python e' continuacao de linha, entao some. Uma continuacao
+     de linha de shell virou linha unica de 120 colunas sem erro nenhum. Usar
+     `chr(92)` quando o texto gerado precisa conter barra.
 
 E um furo de processo: rodei `equivalencia_dtype.sh` sem pegar o lock porque
 aquele script era anterior ao lock. A auditoria seguinte achou DEZ scripts sem
