@@ -1,0 +1,8 @@
+# The repo root ignores benchmarks/**/*.json because benchmarks emit JSON.
+# matrix.json is the opposite: it is the input that defines the sweep, so it
+# has to be versioned or the runner is not reproducible.
+!matrix.json
+
+# These are outputs. Each machine writes its own; merging them is meaningless.
+results.jsonl
+log_*.txt

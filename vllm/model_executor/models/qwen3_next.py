@@ -588,6 +588,12 @@ def _all_gather_hidden_and_residual(
 
 @support_torch_compile
 class Qwen3NextModel(nn.Module, EagleModelMixin):
+    # Aux taps reach the drafter on the last PP rank. Qwen3.5 inherits this
+    # model, and its DSpark drafter taps layers 5/17/29/41/53 of 64 -- every one
+    # of them upstream of the split that fits this pair of cards, so all five
+    # cross the boundary each step.
+    supports_aux_hidden_states_over_pp = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
@@ -662,7 +668,19 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+
+        # Taps computed by earlier stages, forwarded in pipeline order.
+        remote_aux: list[torch.Tensor] = []
+        if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
+            remote_aux = self.recv_remote_aux_from_producers(intermediate_tensors)
+
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            # Only the first stage owns the pre-layer tap: seeding it on every
+            # rank would hand the drafter the same tensor once per stage.
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -696,8 +714,15 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
+            # Merged by unpacking, never dict.update: the compile wrapper
+            # refuses any forward whose bytecode names `update`, which is its
+            # heuristic for buffer mutation under cudagraphs.
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_for_last(aux_hidden_states),
+                }
             )
         if hidden_states.shape[0] != full_num_tokens:
             hidden_states, residual = _all_gather_hidden_and_residual(
@@ -707,6 +732,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 self.config.hidden_size,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

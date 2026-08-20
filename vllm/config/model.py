@@ -451,7 +451,17 @@ class ModelConfig:
         # affects the computation graph of the language model, therefore we add it
         # here early.
         if self.multimodal_config:
-            factors["language_model_only"] = self.multimodal_config.language_model_only
+            # Whether the multimodal path is active decides whether the language
+            # model is handed inputs_embeds or None, so it belongs in the key.
+            # The fields that decide it are enumerated by the config that owns
+            # them, not copied here, because a copy goes stale silently.
+            #
+            # Kept as separate factors rather than one boolean: language_model_only
+            # also switches the fused QK-norm/RoPE/gate kernel in Qwen3Next, so two
+            # runs that both end up text-only do not share a graph. Errs toward
+            # over-invalidation -- an extra compile is cheap, serving a graph built
+            # under the other branch is not.
+            factors["mm_graph"] = self.multimodal_config.graph_factors()
         return hash_factors(factors)
 
     def _update_nested(

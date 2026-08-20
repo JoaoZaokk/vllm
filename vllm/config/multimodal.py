@@ -342,6 +342,33 @@ class MultiModalConfig:
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
+    def graph_factors(self) -> dict[str, Any]:
+        """Config fields that decide whether the multimodal path runs.
+
+        MultiModalRegistry.supports_multimodal_inputs owns the final answer,
+        since it also needs the modalities the model actually supports. What
+        lives here is the set of fields on this config that it reads, kept next
+        to get_limit_per_prompt so that adding a field which changes the answer
+        is one edit rather than an edit plus a mirrored copy inside
+        ModelConfig.compute_hash. That mirror is how enable_mm_embeds was
+        missed: it was added to the predicate and never to the key.
+
+        Not part of compute_hash, which is the ViT graph and deliberately
+        excludes all of this.
+        """
+        return {
+            "language_model_only": self.language_model_only,
+            "enable_mm_embeds": self.enable_mm_embeds,
+            # Short-circuits the language model dummy run entirely
+            # (gpu_model_runner.py:5874, 6251, 6408).
+            "mm_encoder_only": self.mm_encoder_only,
+            "zeroed_modalities": sorted(
+                modality
+                for modality in self.limit_per_prompt
+                if self.get_limit_per_prompt(modality) == 0
+            ),
+        }
+
     def get_limit_per_prompt(self, modality: str) -> int:
         """
         Get the maximum number of input items allowed per prompt
